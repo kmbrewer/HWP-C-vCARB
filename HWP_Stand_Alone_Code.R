@@ -19,8 +19,12 @@
 ###########################################
 ## R libraries
 
-renv::restore()   # Begin here to download appropriate package versions
+# renv::restore()   # Begin here to download appropriate package versions
 
+renv::record("renv@1.1.5")
+
+install.packages("tidyverse")
+install.packages("C:/Users/kbrewer/Downloads/renv_1.1.5.zip", repos = NULL, type = "win.binary")
 
 # Loading libraries
 library(tidyverse)
@@ -32,6 +36,7 @@ library(triangle)   # for generating random variables from triangular distributi
 library(lhs)        # Latin Hypercube Sampling
 library(networkD3)   # Sankey diagram
 
+renv::snapshot()
 
 ##########################################################################
 ###  Constants specific to the stand-alone version of the model
