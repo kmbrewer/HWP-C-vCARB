@@ -86,6 +86,10 @@ if (hwp.data$HWP_MODEL_OPTIONS$QA_TEST[1] == TRUE) {      # Should QA test be ru
   tpr.hwp <- hwp.data$TimberProdRatios     # Timber product ratios  (n = 40)
   ppr.hwp <- hwp.data$PrimaryProdRatio      # Primary product ratios (n = 64) 
   eur.hwp <- hwp.data$EndUseRatios       # Loading End Use Ratios (n = N.EUR)
+  imports_primary.hwp <- hwp.data$Imports_Primary      # primary product imports (e.g., lumber, plywood)
+  imports_enduse.hwp  <- hwp.data$Imports_EndUse       # already allocated end-use imports (e.g., furniture, paper)
+  exports_primary.hwp <- hwp.data$Exports_Primary      # primary product exports
+  exports_enduse.hwp  <- hwp.data$Exports_EndUse       # end-use exports
   ratio_cat.hwp <- hwp.data$RatioCategories    # Associates TPR, EUR, and PPR values
   ccf_conversion.hwp <- hwp.data$CCF_MT_Conversion     # getting hundred cubic feet (CCF) to metric ton (MT) carbon conversion factors
   eu_half.lives.hwp <- hwp.data$EU_HalfLives    # Half-lives of End Use Products
@@ -108,10 +112,10 @@ for (i in 1:ncol(hwp.model.options)) {             # Using for-loop to add colum
 names(opt.list) <- colnames(hwp.model.options)
 
 OUTPUT_ARRAYS <- unlist(opt.list$OUTPUT_ARRAYS, use.names = F)[1]  # Save HWP model arrays in Arrays folder?
-#OUTPUT_FIGURES <- unlist(opt.list$OUTPUT_FIGURES, use.names = F)[1]  # Save HWP model figures in Figures folder?
+OUTPUT_FIGURES <- unlist(opt.list$OUTPUT_FIGURES, use.names = F)[1]  # Save HWP model figures in Figures folder?
 OUTPUT_TABLES <- unlist(opt.list$OUTPUT_TABLES, use.names = F)[1]  # Save HWP model tables in Tables folder?
 
-#FIGURELOC <- unlist(opt.list$FIGURELOC, use.names = F)[1]   # Figure storage folder 
+FIGURELOC <- unlist(opt.list$FIGURELOC, use.names = F)[1]   # Figure storage folder 
 ARRAYLOC <- unlist(opt.list$ARRAYLOC, use.names = F)[1]     # Array storage folder
 TABLELOC <- unlist(opt.list$TABLELOC, use.names = F)[1]    # Table storage folder
 
@@ -135,7 +139,15 @@ hwp.output <- HwpModel.fcn(harv = harv.hwp,
                            N.OWNERSHIP = N.OWNERSHIP, 
                            N.YEARS = N.YEARS, 
                            PIU.WOOD.LOSS = PIU.WOOD.LOSS,
-                           PIU.PAPER.LOSS = PIU.PAPER.LOSS)
+                           PIU.PAPER.LOSS = PIU.PAPER.LOSS,  
+imports_primary = imports_primary.hwp,
+imports_enduse  = imports_enduse.hwp,
+exports_primary = exports_primary.hwp,
+exports_enduse  = exports_enduse.hwp,
+include_imports = TRUE,
+include_exports = TRUE
+)
+
 
 # Prepare outputs for use in tables and arrays
 model.outputs <- hwp.output  
