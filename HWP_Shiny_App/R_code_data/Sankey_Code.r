@@ -44,6 +44,20 @@ hwp.sankey.output <- HwpModel.Sankey.fcn(harv = harv.red.hwp,
 
 # Harvest
 eur_mmtc <- sum(hwp.sankey.output$eu_matrix[, 1])
+# Imports (as visible node)
+if ("Imports" %in% ownership.names) {
+  import_idx <- which(ownership.names == "Imports")
+  imports_mmtc <- sum(hwp.sankey.output$eu_matrix[, import_idx])
+} else {
+  imports_mmtc <- 0
+}
+# Exports (as terminal node)
+if ("Exports" %in% ownership.names) {
+  export_idx <- which(ownership.names == "Exports")
+  exports_mmtc <- sum(hwp.sankey.output$eu_matrix[, export_idx])  # Total exported carbon at EUR stage
+} else {
+  exports_mmtc <- 0
+}
 # harvest to EEC
 eec_mmtc <- sum(hwp.sankey.output$eec_matrix[, 1])
 # harvest to PIU
@@ -115,14 +129,35 @@ recov.discard_mmtc <- sum(hwp.sankey.output$recov.discard_matrix[, 1:d.yrs])
 ewoec_mmtc <- sum(swds.discard_mmtc, bwoec.input_mmtc, compost.input_mmtc, recov.discard_mmtc)
 # Correct check = landfill/dump/recov yrs 2 & 3, bwoec/compost yrs 1 & 2
 
-
-nodes <- data.frame(name = c("Primary Products = Total Harvest", "Emitted with Energy Capture", "Products in Use", "Loss When Wood Placed Into End Uses", 
+# Define nodes 
+nodes <- data.frame(name = c("Imports", "Primary Products = Total Harvest", "Emitted with Energy Capture", "Products in Use", "Loss When Wood Placed Into End Uses", 
                              "Loss When Pulp Placed Into End Uses",   "Discard", "Dumps", "Landfill, Permanent", 
-                             "Landfill, Decomposing", "Compost", "Burned", "Recovered", "Emitted without\nEnergy Capture", "Discard Energy Capture"))
+                             "Landfill, Decomposing", "Compost", "Burned", "Recovered", "Emitted without\nEnergy Capture", "Discard Energy Capture", "Exports"))
 
-
+# Initialize matrix
 mat.mmtc <- matrix(0, nrow = length(nodes$name), ncol = length(nodes$name))
-mat.mmtc[1,] <- c(0, eec_mmtc, eu.reduced_mmtc, dp.wood_mmtc, dp.paper_mmtc, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+# Row/column indices for Imports and Exports
+imports_row <- which(nodes$name == "Imports")
+primary_row <- which(nodes$name == "Primary Products = Total Harvest")
+exports_col <- which(nodes$name == "Exports")
+
+# Imports → Primary Products
+mat.mmtc[imports_row, primary_row] <- imports_mmtc
+
+# Primary Products → All downstream flows
+mat.mmtc[primary_row, ] <- c(
+  0,                     # Imports (no backflow)
+  0,                     # Primary Products
+  eec_mmtc,              # Emitted with Energy Capture
+  eu.reduced_mmtc,       # Products in Use
+  dp.wood_mmtc,          # Loss when wood placed into end uses
+  dp.paper_mmtc,         # Loss when pulp placed into end uses
+  0, 0, 0, 0, 0, 0, 0, 0, 0,
+  exports_mmtc           # Exports terminal flow
+)
+
+# Continue original matrix row assignments
 mat.mmtc[3,] <- c(0, 0, 0, 0, 0, pu.discard_mmtc, 0, 0, 0, 0, 0, 0, 0, 0)
 mat.mmtc[4,] <- c(0, 0, 0, 0, 0, dp.wood_mmtc, 0, 0, 0, 0, 0, 0, 0, 0)
 mat.mmtc[5,] <- c(0, 0, 0, 0, 0, dp.paper_mmtc,  0, 0, 0, 0, 0, 0, 0, 0)

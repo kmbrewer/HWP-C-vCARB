@@ -75,6 +75,12 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
   eu_array <- array(eu_ratios$MTC, c(N.EUR, N.OWNERSHIP, N.YEARS))      # creating the array (worksheet: CheckEUC)
   dimnames(eu_array) <-  list(c(1:N.EUR), ownership.names, c(min(harv_cf$Year):max(harv_cf$Year)))
   
+  # Subtract Exports from eu_array (carbon removed from system after EUR, before PIU or SWDS)
+  if ("Exports" %in% ownership.names) {
+    export_idx <- which(ownership.names == "Exports")
+    eu_array[ , export_idx, ] <- 0  # Zero out Exports
+  }
+  
   # Finding the End Use Product rows that correspond to fuel wood
   eur.fuel <- grep("fuel", ratio_cat$EndUseProduct)
   

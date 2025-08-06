@@ -169,6 +169,12 @@ if (OUTPUT_TABLES == TRUE) {
   write_csv(t4.5, paste0(TABLELOC, "T4.5.CumulativeStorageEmissions_detail.csv"))
   write_csv(t4.8, paste0(TABLELOC, "T4.8.CumulativeStorageEmissions_halflives.csv"))
   write_csv(t5, paste0(TABLELOC, "T5.0.AnnualStorageEmissionsChange.csv"))
+  write_csv(t6, paste0(TABLELOC, "T6.0.Export_Totals.csv"))
+  write_csv(t6.1, paste0(TABLELOC, "T6.1.Cumulative_Export_Totals.csv"))
+  write_csv(t6.2, paste0(TABLELOC, "T6.2.Export_Percent_of_EUR.csv"))
+  write_csv(t7, paste0(TABLELOC, "T7.0.Import_Totals.csv"))
+  write_csv(t7.1, paste0(TABLELOC, "T7.1.Cumulative_Import_Totals.csv"))
+  write_csv(t7.2, paste0(TABLELOC, "T7.2.Import_Percent_of_EUR.csv"))
 }
 
 
