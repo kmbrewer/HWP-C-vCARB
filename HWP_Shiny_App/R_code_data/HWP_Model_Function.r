@@ -175,7 +175,31 @@ HwpModel.fcn <- function(
     }
   }
   
-  
+  ConvertPrimaryTradeToMTC.fcn <- function(primary_trade_df, eur, ratio_cat, ccf_conversion, ownership.names, N.EUR, N.OWNERSHIP, N.YEARS) {
+    # Tidy primary trade input
+    primary_trade_long <- primary_trade_df %>%
+      pivot_longer(cols = 2:(length(ownership.names) + 1), names_to = "Source", values_to = "Vol_CCF") %>%
+      mutate(Vol_CCF = ifelse(is.na(Vol_CCF), 0, Vol_CCF))
+    
+    # Prepare EUR ratios
+    eu_ratios <- eur %>%
+      left_join(ratio_cat[, 1:3], by = "EndUseID") %>%
+      pivot_longer(cols = 2:(N.YEARS + 1), names_to = "Year", values_to = "EU_Values") %>%
+      mutate(Year = as.numeric(Year)) %>%
+      left_join(ccf_conversion, by = "PrimaryProductID") %>%
+      arrange(Year, factor(ownership.names, levels = ownership.names))
+    
+    # Join trade data with EUR and conversion data
+    combined_df <- left_join(eu_ratios, primary_trade_long, by = c("Year", "Source" = "Source"), relationship = "many-to-many") %>%
+      mutate(MTC = EU_Values * CCFtoMTconv * Vol_CCF) %>%
+      replace_na(list(MTC = 0))
+    
+    # Build output array
+    trade_array <- array(combined_df$MTC, dim = c(N.EUR, N.OWNERSHIP, N.YEARS))
+    dimnames(trade_array) <- list(c(1:N.EUR), ownership.names, as.character(sort(unique(combined_df$Year))))
+    
+    return(trade_array)
+  }
   
   # Finding the End Use Product rows that correspond to fuel wood
   eur.fuel <- grep("fuel", ratio_cat$EndUseProduct)

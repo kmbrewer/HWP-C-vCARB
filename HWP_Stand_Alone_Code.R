@@ -91,7 +91,8 @@ if (hwp.data$HWP_MODEL_OPTIONS$QA_TEST[1] == TRUE) {      # Should QA test be ru
   exports_primary.hwp <- hwp.data$Exports_Primary      # primary product exports
   exports_enduse.hwp  <- hwp.data$Exports_EndUse       # end-use exports
   ratio_cat.hwp <- hwp.data$RatioCategories    # Associates TPR, EUR, and PPR values
-  ccf_conversion.hwp <- hwp.data$CCF_MT_Conversion     # getting hundred cubic feet (CCF) to metric ton (MT) carbon conversion factors
+  ccf_conversion.hwp <- setNames(hwp.data$CCF_MT_Conversion$CCFtoMTconv,
+                                 hwp.data$CCF_MT_Conversion$PrimaryProductID)  # getting hundred cubic feet (CCF) to metric ton (MT) carbon conversion factors
   eu_half.lives.hwp <- hwp.data$EU_HalfLives    # Half-lives of End Use Products
   discard.fates.hwp <- hwp.data$DiscardFates    # Fraction of discarded C to different fates (dumps, compost, landfill, burned with energy capture, etc.)
   discard.hl.hwp <- hwp.data$Discard_HalfLives  # Half-lives of discards in different SWDS categories (dumps, landfills) plus fraction of landfill discard that doesn't decay
@@ -119,6 +120,124 @@ FIGURELOC <- unlist(opt.list$FIGURELOC, use.names = F)[1]   # Figure storage fol
 ARRAYLOC <- unlist(opt.list$ARRAYLOC, use.names = F)[1]     # Array storage folder
 TABLELOC <- unlist(opt.list$TABLELOC, use.names = F)[1]    # Table storage folder
 
+
+############# Preprocess your imports of primary products (or exports) into carbon units (MTC)
+
+ConvertPrimaryTradeToMTC.fcn <- function(primary_trade_df, eur, ratio_cat, ccf_conversion,
+                                         ownership.names, N.EUR, N.OWNERSHIP, N.YEARS) {
+  message("Converting primary trade to MTC...")
+  
+  trade_long <- primary_trade_df %>%
+    pivot_longer(cols = 2:ncol(primary_trade_df), names_to = "Ownership", values_to = "VolumeCCF") %>%
+    mutate(Year = as.numeric(Year))
+  
+  # Join with RatioCategories to get EndUseID
+  trade_long <- trade_long %>%
+    left_join(ratio_cat[, c("PrimaryProductID", "EndUseID")], by = "PrimaryProductID")
+  
+  # Get numeric index of ownership and year
+  trade_long <- trade_long %>%
+    left_join(data.frame(Ownership = ownership.names, idx = 1:N.OWNERSHIP), by = "Ownership") %>%
+    left_join(data.frame(Year = min(trade_long$Year):max(trade_long$Year), yr_idx = 1:N.YEARS), by = "Year")
+  
+  # Convert volume to MT using PrimaryProductID as lookup
+  trade_long <- trade_long %>%
+    mutate(MT = VolumeCCF * ccf_conversion[as.character(PrimaryProductID)])
+  
+  # Create empty output array
+  output_array <- array(0, dim = c(N.EUR, N.OWNERSHIP, N.YEARS))
+  
+  # Fill the array
+  for (i in 1:nrow(trade_long)) {
+    euidx <- trade_long$EndUseID[i]
+    ownidx <- trade_long$idx[i]
+    yidx <- trade_long$yr_idx[i]
+    output_array[euidx, ownidx, yidx] <- output_array[euidx, ownidx, yidx] + trade_long$MT[i]
+  }
+  
+  return(output_array)
+}
+
+
+imports.primary.array <- ConvertPrimaryTradeToMTC.fcn(
+  primary_trade_df = imports_primary.hwp,
+  eur = eur.hwp,
+  ratio_cat = ratio_cat.hwp,
+  ccf_conversion = ccf_conversion.hwp,
+  ownership.names = ownership.names,
+  N.EUR = N.EUR,
+  N.OWNERSHIP = N.OWNERSHIP,
+  N.YEARS = N.YEARS
+)
+
+exports.primary.array <- ConvertPrimaryTradeToMTC.fcn(
+  primary_trade_df = exports_primary.hwp,
+  eur = eur.hwp,
+  ratio_cat = ratio_cat.hwp,
+  ccf_conversion = ccf_conversion.hwp,
+  ownership.names = ownership.names,
+  N.EUR = N.EUR,
+  N.OWNERSHIP = N.OWNERSHIP,
+  N.YEARS = N.YEARS
+)
+
+
+############# End-Use Imports and Exports (already in MTC → drop directly into eu_array)
+
+ConvertEndUseTradeToMTC.fcn <- function(enduse_trade_df, ccf_conversion,
+                                        ownership.names, N.EUR, N.OWNERSHIP, N.YEARS,
+                                        ratio_cat) {
+  message("Converting end-use trade to MTC...")
+  
+  trade_long <- enduse_trade_df %>%
+    pivot_longer(cols = 2:ncol(enduse_trade_df), names_to = "Ownership", values_to = "VolumeCCF") %>%
+    mutate(Year = as.numeric(Year))
+  
+  # Get PrimaryProductID from EndUseID using RatioCategories
+  trade_long <- trade_long %>%
+    left_join(ratio_cat[, c("EndUseID", "PrimaryProductID")], by = "EndUseID")
+  
+  trade_long <- trade_long %>%
+    left_join(data.frame(Ownership = ownership.names, idx = 1:N.OWNERSHIP), by = "Ownership") %>%
+    left_join(data.frame(Year = min(trade_long$Year):max(trade_long$Year), yr_idx = 1:N.YEARS), by = "Year")
+  
+  trade_long <- trade_long %>%
+    mutate(MT = VolumeCCF * ccf_conversion[as.character(PrimaryProductID)])
+  
+  output_array <- array(0, dim = c(N.EUR, N.OWNERSHIP, N.YEARS))
+  
+  for (i in 1:nrow(trade_long)) {
+    euidx <- trade_long$EndUseID[i]
+    ownidx <- trade_long$idx[i]
+    yidx <- trade_long$yr_idx[i]
+    output_array[euidx, ownidx, yidx] <- output_array[euidx, ownidx, yidx] + trade_long$MT[i]
+  }
+  
+  return(output_array)
+}
+
+
+if (include_imports) {
+  imports.enduse.array <- ConvertEndUseTradeToMTC.fcn(
+    enduse_trade_df = imports_enduse.hwp,
+    ccf_conversion = ccf_conversion.hwp,
+    ownership.names = ownership.names,
+    N.EUR = N.EUR,
+    N.OWNERSHIP = N.OWNERSHIP,
+    N.YEARS = N.YEARS
+  )
+}
+
+if (include_exports) {
+  exports.enduse.array <- ConvertEndUseTradeToMTC.fcn(
+    enduse_trade_df = exports_enduse.hwp,
+    ccf_conversion = ccf_conversion.hwp,
+    ownership.names = ownership.names,
+    N.EUR = N.EUR,
+    N.OWNERSHIP = N.OWNERSHIP,
+    N.YEARS = N.YEARS
+  )
+}
 
 ############# RUN HWP BASE MODEL ###############
 source(paste0(SHINY.CODE, "PlotFunctions1.r"), local = TRUE)     # Loading functions used by the HWP model.
