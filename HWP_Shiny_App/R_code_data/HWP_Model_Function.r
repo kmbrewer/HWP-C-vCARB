@@ -22,16 +22,8 @@
 ## Model Code
 ########################################################
 
-HwpModel.fcn <- function(
-    harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, eu_half.lives, discard.fates, discard.hl,
-    ownership.names, N.EUR, N.OWNERSHIP, N.YEARS, PIU.WOOD.LOSS, PIU.PAPER.LOSS,
-    imports_primary = NULL,    # primary product imports
-    imports_enduse  = NULL,    # end-use imports
-    exports_primary = NULL,    # primary product exports
-    exports_enduse  = NULL,    # end-use exports
-    include_imports = TRUE,    # toggle
-    include_exports = TRUE     # toggle
-){
+HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, eu_half.lives, discard.fates, discard.hl, 
+                         ownership.names, N.EUR, N.OWNERSHIP, N.YEARS, PIU.WOOD.LOSS, PIU.PAPER.LOSS) {
   
   # Constructing data to place in the End Use Products array
   harv[is.na(harv) == T] <- 0        # Replace NAs with zeros
@@ -83,124 +75,6 @@ HwpModel.fcn <- function(
   eu_array <- array(eu_ratios$MTC, c(N.EUR, N.OWNERSHIP, N.YEARS))      # creating the array (worksheet: CheckEUC)
   dimnames(eu_array) <-  list(c(1:N.EUR), ownership.names, c(min(harv_cf$Year):max(harv_cf$Year)))
   
-  # Add primary product imports to EU array
-  if (include_imports & !is.null(imports_primary)) {
-    message("Adding primary imports to EU array...")
-    
-    imports_primary_long <- imports_primary %>%
-      pivot_longer(cols = 2:ncol(imports_primary), names_to = "Ownership", values_to = "Vol_cf") %>%
-      mutate(Year = as.numeric(Year)) %>%
-      left_join(ratio_cat[, c("TimberProductID", "PrimaryProductID", "EndUseID")], by = "PrimaryProductID") %>%
-      left_join(eur %>% pivot_longer(cols = 2:(N.YEARS + 1), names_to = "Year", values_to = "EU_Values") %>%
-                  mutate(Year = as.numeric(Year)),
-                by = c("EndUseID", "Year")) %>%
-      left_join(ccf_conversion, by = "PrimaryProductID") %>%
-      mutate(MTC = Vol_cf * EU_Values * CCFtoMTconv) %>%
-      left_join(data.frame(Ownership = ownership.names, idx = 1:length(ownership.names)), by = "Ownership") %>%
-      left_join(data.frame(Year = min(harv_cf$Year):max(harv_cf$Year), yr_idx = 1:N.YEARS), by = "Year")
-    
-    for (i in 1:nrow(imports_primary_long)) {
-      eup_idx <- as.integer(imports_primary_long$EndUseID[i])
-      own_idx <- imports_primary_long$idx[i]
-      year_idx <- imports_primary_long$yr_idx[i]
-      mtc_val <- imports_primary_long$MTC[i]
-      
-      eu_array[eup_idx, own_idx, year_idx] <- eu_array[eup_idx, own_idx, year_idx] + mtc_val
-    }
-  }
-  
-  # Add end-use product imports to EU array
-  if (include_imports & !is.null(imports_enduse)) {
-    message("Adding end-use imports to EU array...")
-    
-    imports_enduse_long <- imports_enduse %>%
-      pivot_longer(cols = 2:ncol(imports_enduse), names_to = "Ownership", values_to = "MTC") %>%
-      mutate(Year = as.numeric(Year)) %>%
-      left_join(data.frame(Ownership = ownership.names, idx = 1:length(ownership.names)), by = "Ownership") %>%
-      left_join(data.frame(Year = min(harv_cf$Year):max(harv_cf$Year), yr_idx = 1:N.YEARS), by = "Year")
-    
-    for (i in 1:nrow(imports_enduse_long)) {
-      eup_idx <- as.integer(imports_enduse_long$EndUseID[i])
-      own_idx <- imports_enduse_long$idx[i]
-      year_idx <- imports_enduse_long$yr_idx[i]
-      mtc_val <- imports_enduse_long$MTC[i]
-      
-      eu_array[eup_idx, own_idx, year_idx] <- eu_array[eup_idx, own_idx, year_idx] + mtc_val
-    }
-  }
-  
-  # Subtracting primary exports from EU array
-  if (include_exports & !is.null(exports_primary)) {
-    message("Subtracting primary exports from EU array...")
-    
-    exports_primary_long <- exports_primary %>%
-      pivot_longer(cols = 2:ncol(exports_primary), names_to = "Ownership", values_to = "Vol_cf") %>%
-      mutate(Year = as.numeric(Year)) %>%
-      left_join(ratio_cat[, c("TimberProductID", "PrimaryProductID", "EndUseID")], by = "PrimaryProductID") %>%
-      left_join(eur %>% pivot_longer(cols = 2:(N.YEARS + 1), names_to = "Year", values_to = "EU_Values") %>%
-                  mutate(Year = as.numeric(Year)),
-                by = c("EndUseID", "Year")) %>%
-      left_join(ccf_conversion, by = "PrimaryProductID") %>%
-      mutate(MTC = Vol_cf * EU_Values * CCFtoMTconv) %>%
-      left_join(data.frame(Ownership = ownership.names, idx = 1:length(ownership.names)), by = "Ownership") %>%
-      left_join(data.frame(Year = min(harv_cf$Year):max(harv_cf$Year), yr_idx = 1:N.YEARS), by = "Year")
-    
-    for (i in 1:nrow(exports_primary_long)) {
-      eup_idx <- as.integer(exports_primary_long$EndUseID[i])
-      own_idx <- exports_primary_long$idx[i]
-      year_idx <- exports_primary_long$yr_idx[i]
-      mtc_val <- exports_primary_long$MTC[i]
-      
-      eu_array[eup_idx, own_idx, year_idx] <- eu_array[eup_idx, own_idx, year_idx] - mtc_val
-    }
-  }
-  
-  #Subtracting end-use exports from EU array
-  if (include_exports & !is.null(exports_enduse)) {
-    message("Subtracting end-use exports from EU array...")
-    
-    exports_enduse_long <- exports_enduse %>%
-      pivot_longer(cols = 2:ncol(exports_enduse), names_to = "Ownership", values_to = "MTC") %>%
-      mutate(Year = as.numeric(Year)) %>%
-      left_join(data.frame(Ownership = ownership.names, idx = 1:length(ownership.names)), by = "Ownership") %>%
-      left_join(data.frame(Year = min(harv_cf$Year):max(harv_cf$Year), yr_idx = 1:N.YEARS), by = "Year")
-    
-    for (i in 1:nrow(exports_enduse_long)) {
-      eup_idx <- as.integer(exports_enduse_long$EndUseID[i])
-      own_idx <- exports_enduse_long$idx[i]
-      year_idx <- exports_enduse_long$yr_idx[i]
-      mtc_val <- exports_enduse_long$MTC[i]
-      
-      eu_array[eup_idx, own_idx, year_idx] <- eu_array[eup_idx, own_idx, year_idx] - mtc_val
-    }
-  }
-  
-  ConvertPrimaryTradeToMTC.fcn <- function(primary_trade_df, eur, ratio_cat, ccf_conversion, ownership.names, N.EUR, N.OWNERSHIP, N.YEARS) {
-    # Tidy primary trade input
-    primary_trade_long <- primary_trade_df %>%
-      pivot_longer(cols = 2:(length(ownership.names) + 1), names_to = "Source", values_to = "Vol_CCF") %>%
-      mutate(Vol_CCF = ifelse(is.na(Vol_CCF), 0, Vol_CCF))
-    
-    # Prepare EUR ratios
-    eu_ratios <- eur %>%
-      left_join(ratio_cat[, 1:3], by = "EndUseID") %>%
-      pivot_longer(cols = 2:(N.YEARS + 1), names_to = "Year", values_to = "EU_Values") %>%
-      mutate(Year = as.numeric(Year)) %>%
-      left_join(ccf_conversion, by = "PrimaryProductID") %>%
-      arrange(Year, factor(ownership.names, levels = ownership.names))
-    
-    # Join trade data with EUR and conversion data
-    combined_df <- left_join(eu_ratios, primary_trade_long, by = c("Year", "Source" = "Source"), relationship = "many-to-many") %>%
-      mutate(MTC = EU_Values * CCFtoMTconv * Vol_CCF) %>%
-      replace_na(list(MTC = 0))
-    
-    # Build output array
-    trade_array <- array(combined_df$MTC, dim = c(N.EUR, N.OWNERSHIP, N.YEARS))
-    dimnames(trade_array) <- list(c(1:N.EUR), ownership.names, as.character(sort(unique(combined_df$Year))))
-    
-    return(trade_array)
-  }
-  
   # Finding the End Use Product rows that correspond to fuel wood
   eur.fuel <- grep("fuel", ratio_cat$EndUseProduct)
   
@@ -223,8 +97,8 @@ HwpModel.fcn <- function(
   dp_array <- sweep(eu_array, MARGIN = 1, PIU.LOSS, `*`)    # Multiply the eu_array by the loss vector to create the discarded products array (dp_array).
   
   dp_array[eur.fuel, , ] <- 0            # Removing fuel wood from the dp_array because it is assumed burned in the given year (no discard). 
-
-    
+  
+  
   
   # Need to develop an array where the products in use take into account the new products and the half-life of earlier products
   nonPIU.loss <- 1.0 - PIU.LOSS
@@ -372,6 +246,5 @@ HwpModel.fcn <- function(
               recov_array = recov_array ))
   
 }
-
 
 
