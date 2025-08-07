@@ -402,10 +402,18 @@ Decay.fcn <- function(empty.array, first.array, target.array, decay.matrix, N.EU
   decay.array[, , 1] <- target.array[, , 1]   # The first year = initial values
   for (k in 1:N.EUR) {  
     for (j in 1:N.OWNERSHIP) {
-      if (empty.array[k,j] == 0) next 
-      totals.array[k, j, ] <- cumsum(target.array[k, j,])
+      # Skip if there's no data (empty or NA)
+      if (is.na(empty.array[k, j]) || empty.array[k, j] == 0) next
       
-      for (i in first.array[k,j]:N.YEARS) {
+      # Safely assign cumsum only if there are non-NA values
+      if (all(is.na(target.array[k, j, ]))) next
+      totals.array[k, j, ] <- cumsum(replace(target.array[k, j, ], is.na(target.array[k, j, ]), 0))
+      
+      # Ensure first index is valid
+      first.year <- first.array[k, j]
+      if (is.na(first.year) || first.year < 2 || first.year > N.YEARS) next
+      
+      for (i in first.year:N.YEARS) {
         decay.array[k, j, i] <- as.numeric(target.array[k, j, i] + decay.array[k, j, i - 1] * exp(-1 * log(2)/decay.matrix[[k,2]]))
       }
     }

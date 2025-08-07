@@ -142,13 +142,26 @@ error.report$harv_hwp[3] <- harv.vals.numeric.check$msg ; terminate$harv_hwp[3] 
 harv.col <- ncol(harv.hwp)  
 if (harv_true1 & terminate$harv_hwp[2] == 0 & terminate$harv_hwp[3] == 0) {
   if (ncol(harv.hwp) > 2) {   # This check only applies to harvest files with ownership values.  It skips those that only have Year and Total
-    harv.hwp.test2 <- harv.hwp[which(apply(as.matrix(harv.hwp[,2:(ncol(harv.hwp) - 1)]), 1, function(x) all(is.na(x)) == F)), ] # Complex call to find out which ownership rows have non-NA values
-    if (all(apply(as.matrix(harv.hwp.test2[,2:(ncol(harv.hwp.test2) - 1)]), 1, sum) - harv.hwp.test2$Total < 0.001)) {
-      error.report$harv_hwp[4] <- "Sum of ownership harvest values equals Total values"} else {
-        error.report$harv_hwp[4] <- "Ownership value sums DO NOT all equal Total values"
-        terminate$harv_hwp[4] <- 1} 
+    ownership.cols <- 2:(ncol(harv.hwp) - 1)
+    
+    if (length(ownership.cols) > 0) {
+      harv.hwp.test2 <- harv.hwp[which(apply(as.matrix(harv.hwp[, ownership.cols]), 1, function(x) all(is.na(x)) == FALSE)), ]
+    } else {
+      harv.hwp.test2 <- harv.hwp  # fallback: just keep everything
+    }
+    
+    ownership.cols.test2 <- 2:(ncol(harv.hwp.test2) - 1)
+    
+    if (length(ownership.cols.test2) > 0 &&
+        all((apply(as.matrix(harv.hwp.test2[, ownership.cols.test2]), 1, sum, na.rm = TRUE) - harv.hwp.test2$Total) < 0.001, na.rm = TRUE)) {
+      error.report$harv_hwp[4] <- "Sum of ownership harvest values equals Total values"
+    } else {
+      error.report$harv_hwp[4] <- "Ownership value sums DO NOT all equal Total values"
+      terminate$harv_hwp[4] <- 1
+    }
   }
 }
+
 
 # QA checks for bfcf.hwp
 bfcf_hwp <- tC.read("BFCF"); bfcf.hwp <- bfcf_hwp$tble; terminate$bfcf_hwp[1] <- bfcf_hwp$term; error.report$bfcf_hwp[1] <- bfcf_hwp$msg

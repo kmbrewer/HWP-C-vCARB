@@ -70,16 +70,25 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
     left_join(ppr_preArray, by = c("TimberProductID", "PrimaryProductID" , "Year"), relationship = "many-to-many") %>%
     arrange(Year, factor(Source, levels = ownership.names)) %>%
     mutate(MTC = EU_Values * ProdRatio * PP_Values * CCFtoMTconv * Vol_cf)  # metric tons of carbon 
-  
+ 
+  # === Check for NA values in MTC from missing CCF conversions ===
+  num_na <- sum(is.na(eu_ratios$MTC))
+  if (num_na > 0) {
+    message("❗ Found ", num_na, " NA values in eu_ratios$MTC")
+    print(
+      eu_ratios %>% 
+        filter(is.na(MTC)) %>% 
+        select(PrimaryProductID, TimberProductID, EndUseID, Year) %>% 
+        distinct()
+    )
+  }
+   
   # eu_array is the total annual C into each of the use/ownership categories
   eu_array <- array(eu_ratios$MTC, c(N.EUR, N.OWNERSHIP, N.YEARS))      # creating the array (worksheet: CheckEUC)
   dimnames(eu_array) <-  list(c(1:N.EUR), ownership.names, c(min(harv_cf$Year):max(harv_cf$Year)))
   
   # Subtract Exports from eu_array (carbon removed from system after EUR, before PIU or SWDS)
-  if ("Exports" %in% ownership.names) {
-    export_idx <- which(ownership.names == "Exports")
-    eu_array[ , export_idx, ] <- 0  # Zero out Exports
-  }
+  export_idx <- if ("Exports" %in% ownership.names) which(ownership.names == "Exports") else NA
   
   # Finding the End Use Product rows that correspond to fuel wood
   eur.fuel <- grep("fuel", ratio_cat$EndUseProduct)
@@ -92,6 +101,7 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
   # Products in Use array (pu_array)
   euhl <- as.matrix(eu_half.lives)   # matrices run much faster in for-loops than data frames or tibbles
   
+  apply(eu_array, 1, sum)
   
   # Need the discarded products array (dp_array), generated every year from new timber harvest
   eur.pulp <- grep("pulp", ratio_cat$EndUseProduct)      #End use ratio rows for wood pulp 
@@ -249,7 +259,8 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
               dumps_array = dumps_array, 
               pu.final_array = pu.final_array, 
               pu_array = pu_array, 
-              recov_array = recov_array ))
+              recov_array = recov_array, 
+              export_idx = export_idx ))
   
 }
 

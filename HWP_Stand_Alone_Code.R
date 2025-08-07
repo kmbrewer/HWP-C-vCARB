@@ -21,6 +21,9 @@
 
 renv::restore()   # Begin here to download appropriate package versions
 
+install.packages("usethis")
+install.packages("C:/Users/kbrewer/Downloads/chattr_0.3.0.tar.zip", repos = NULL, type = "win.binary")
+
 
 # Loading libraries
 library(tidyverse)
@@ -32,6 +35,18 @@ library(triangle)   # for generating random variables from triangular distributi
 library(lhs)        # Latin Hypercube Sampling
 library(networkD3)   # Sankey diagram
 
+library(usethis)
+library(chattr)
+
+chattr::chattr_use(
+  provider = "openai",
+  model = "gpt-4",
+  )
+chattr::chattr_app()
+file_content <- readLines("HWP_Stand_Alone_Code.R")
+chattr::chat(paste(file_content, collapse = "\n"))
+
+usethis::edit_r_environ()
 
 ##########################################################################
 ###  Constants specific to the stand-alone version of the model
@@ -42,7 +57,7 @@ SANKEY.YEARS.OF.DECAY <- 30    # Set to any number between 3 and 100.
 ### Folder locations
 SHINY.CODE <- "HWP_Shiny_App/R_code_data/"              # Code chunks that both Shiny and the stand-alone model depend upon. They are stored in the Shiny app folder.
 IMPORT.DATA.FOLDER <- "HWP Data/ExistingData/"
-IMPORT.DATA.FILE <- "Oregon_Inputs_HWP_Model.xlsx"    # Change this to select other files from the "HWP Data" folder.
+IMPORT.DATA.FILE <- "CA_Inputs_HWP_Model.xlsx"    # Change this to select other files from the "HWP Data" folder.
 QAQC.FOLDER <- "HWP_Stand_Alone_Files/QAQC_Reports/"
 SA.CODE <- "HWP_Stand_Alone_Files/Standalone_R_files/"   # Stand-alone HWP model code
 
@@ -241,6 +256,10 @@ if (GENERATE.SANKEY == TRUE) {
                 sinksRight = FALSE)
 }
 
+
+print(ownership.names)
+sum(model.outputs$eu_array[, which(ownership.names == "Exports"), ])
+sum(model.outputs$eu_array[, which(ownership.names == "Imports"), ])
 
 
 
