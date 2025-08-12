@@ -40,33 +40,60 @@ hwp.sankey.output <- HwpModel.Sankey.fcn(harv = harv.red.hwp,
                                          ownr.index = ownr.index, 
                                          d.yrs = d.yrs)
 
+# --- Year index for import/export vectors from the full model ---
+yr_col <- match(hwp.yr, years)
 
+# --- Imports/Exports (use the full-model vectors; DO NOT override from Sankey run) ---
+imports_mmtc <- if (!is.null(model.outputs$import_carbon_mt)) {
+  as.numeric(model.outputs$import_carbon_mt[yr_col])
+} else 0
 
-# Harvest
-eur_mmtc <- sum(hwp.sankey.output$eu_matrix[, 1])
-# Imports (as visible node)
-if ("Imports" %in% ownership.names) {
-  import_idx <- which(ownership.names == "Imports")
-  imports_mmtc <- sum(hwp.sankey.output$eu_matrix[, import_idx])
-} else {
-  imports_mmtc <- 0
-}
-# Exports (as terminal node)
-if ("Exports" %in% ownership.names) {
-  export_idx <- which(ownership.names == "Exports")
-  exports_mmtc <- sum(hwp.sankey.output$eu_matrix[, export_idx])  # Total exported carbon at EUR stage
-} else {
-  exports_mmtc <- 0
-}
-# harvest to EEC
-eec_mmtc <- sum(hwp.sankey.output$eec_matrix[, 1])
-# harvest to PIU
-eu.reduced_mmtc <- sum(hwp.sankey.output$eu.reduced_matrix[, 1])
-# harvest to discard
-dp.wood_mmtc <- sum(hwp.sankey.output$dp_matrix[-hwp.sankey.output$eur.pulp, 1])
-dp.paper_mmtc <- sum(hwp.sankey.output$dp_matrix[hwp.sankey.output$eur.pulp, 1])
-# EEC
-# eec_mmtc  # See above. Already calculated
+exports_mmtc <- if (!is.null(model.outputs$export_carbon_mt)) {
+  as.numeric(model.outputs$export_carbon_mt[yr_col])
+} else 0
+
+# --- Core flows from the minimal Sankey model (harvest-only run) ---
+eur_mmtc        <- sum(hwp.sankey.output$eu_matrix[, 1])                 # total primary products this year
+eec_mmtc        <- sum(hwp.sankey.output$eec_matrix[, 1])                # fuel + DEC
+eu.reduced_mmtc <- sum(hwp.sankey.output$eu.reduced_matrix[, 1])         # products in use after PIU loss
+dp.wood_mmtc    <- sum(hwp.sankey.output$dp_matrix[-hwp.sankey.output$eur.pulp, 1])  # wood loss at placement
+dp.paper_mmtc   <- sum(hwp.sankey.output$dp_matrix[ hwp.sankey.output$eur.pulp, 1])  # pulp loss at placement
+
+# PIU discard over decay horizon
+pu.discard_mmtc <- sum(hwp.sankey.output$pu.discard_matrix[, 2:d.yrs])
+
+# Immediate discard fates from DP + PIU discard (already built inside Sankey run)
+landfill.input_mmtc <- sum(hwp.sankey.output$landfill.input_matrix[, 1:d.yrs])
+dumps.input_mmtc    <- sum(hwp.sankey.output$dumps.input_matrix[,    1:d.yrs])
+compost.input_mmtc  <- sum(hwp.sankey.output$compost.input_matrix[,  1:d.yrs])
+bwoec.input_mmtc    <- sum(hwp.sankey.output$bwoec.input_matrix[,    1:d.yrs])  # burned w/o EC
+recov.input_mmtc    <- sum(hwp.sankey.output$recov.input_matrix[,    1:d.yrs])
+dec.input_mmtc      <- sum(hwp.sankey.output$dec.input_matrix[,      1:d.yrs])  # DEC (with EC)
+
+# SWDS emissions over horizon + non-decaying LF stock
+dumps.discard_mmtc     <- sum(hwp.sankey.output$dumps.discard_matrix[,     1:d.yrs])
+landfill.discard_mmtc  <- sum(hwp.sankey.output$landfill.discard_matrix[,  1:d.yrs])
+
+lf.fixed_mmtc       <- sum(hwp.sankey.output$lf.fixed_matrix[, 1:d.yrs])   # permanent LF carbon
+lf.available_mmtc   <- sum(hwp.sankey.output$landfill_matrix[, d.yrs])     # LF stock still decaying at end
+dumps_mmtc          <- sum(hwp.sankey.output$dumps_matrix[,     d.yrs])    # dumps stock at end
+swds_mmtc           <- lf.fixed_mmtc + lf.available_mmtc + dumps_mmtc
+
+recov_mmtc          <- sum(hwp.sankey.output$recov_matrix[, d.yrs])        # stock of recovered in-use at end
+recov.discard_mmtc  <- sum(hwp.sankey.output$recov.discard_matrix[, 1:d.yrs])
+
+# --- Optional: scale primary outflows so that Primary out = Harvest + Imports - Exports ---
+# This keeps mass balance tidy if your minimal run did not already remove exports internally.
+primary_out_raw <- eec_mmtc + eu.reduced_mmtc + dp.wood_mmtc + dp.paper_mmtc + exports_mmtc
+primary_target  <- eur_mmtc + imports_mmtc    # what we want Primary node to represent
+
+scale_factor <- if (primary_out_raw > 0) (primary_target / primary_out_raw) else 1
+# Apply scaling only to the non-export outflows
+eec_mmtc        <- eec_mmtc        * scale_factor
+eu.reduced_mmtc <- eu.reduced_mmtc * scale_factor
+dp.wood_mmtc    <- dp.wood_mmtc    * scale_factor
+dp.paper_mmtc   <- dp.paper_mmtc   * scale_factor
+# Exports stays as-is
 
 # PIU
 # PIU to Discard
@@ -157,41 +184,37 @@ mat.mmtc <- matrix(0, nrow = 16, ncol = 16)
 
 # 4) Fill in the flows by name, one link at a time
 
-# Imports → Primary Products
+# Imports → Primary
 mat.mmtc[idx["Imports"], idx["Primary Products = Total Harvest"]] <- imports_mmtc
 
-# Primary Products → its downstream uses
-mat.mmtc[idx["Primary Products = Total Harvest"], idx["Emitted with Energy Capture"]]    <- eec_mmtc
-mat.mmtc[idx["Primary Products = Total Harvest"], idx["Products in Use"]]                 <- eu.reduced_mmtc
-mat.mmtc[idx["Primary Products = Total Harvest"], idx["Loss When Wood Placed Into End Uses"]] <- dp.wood_mmtc
-mat.mmtc[idx["Primary Products = Total Harvest"], idx["Loss When Pulp Placed Into End Uses"]] <- dp.paper_mmtc
-mat.mmtc[idx["Primary Products = Total Harvest"], idx["Exports"]]                         <- exports_mmtc
+# Primary → downstream
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Emitted with Energy Capture"]]            <- eec_mmtc
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Products in Use"]]                        <- eu.reduced_mmtc
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Loss When Wood Placed Into End Uses"]]    <- dp.wood_mmtc
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Loss When Pulp Placed Into End Uses"]]    <- dp.paper_mmtc
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Exports"]]                                <- exports_mmtc
 
-# Products in Use → Discard
-mat.mmtc[idx["Products in Use"], idx["Discard"]]                                          <- pu.discard_mmtc
+# PIU / placement losses → Discard
+mat.mmtc[idx["Products in Use"],                      idx["Discard"]] <- pu.discard_mmtc
+mat.mmtc[idx["Loss When Wood Placed Into End Uses"],  idx["Discard"]] <- dp.wood_mmtc
+mat.mmtc[idx["Loss When Pulp Placed Into End Uses"],  idx["Discard"]] <- dp.paper_mmtc
 
-# Wood Loss → Discard
-mat.mmtc[idx["Loss When Wood Placed Into End Uses"], idx["Discard"]]                       <- dp.wood_mmtc
+# Discard → immediate fates
+mat.mmtc[idx["Discard"], idx["Dumps"]]                 <- dumps.input_mmtc
+mat.mmtc[idx["Discard"], idx["Landfill, Permanent"]]   <- lf.fixed_mmtc
+mat.mmtc[idx["Discard"], idx["Landfill, Decomposing"]] <- (landfill.input_mmtc - lf.fixed_mmtc)
+mat.mmtc[idx["Discard"], idx["Compost"]]               <- compost.input_mmtc
+mat.mmtc[idx["Discard"], idx["Burned"]]                <- bwoec.input_mmtc            # no EC
+mat.mmtc[idx["Discard"], idx["Recovered"]]             <- recov.input_mmtc
+mat.mmtc[idx["Discard"], idx["Discard Energy Capture"]]<- dec.input_mmtc              # with EC
 
-# Pulp Loss → Discard
-mat.mmtc[idx["Loss When Pulp Placed Into End Uses"], idx["Discard"]]                       <- dp.paper_mmtc
-
-# Discard → immediate disposal fates
-mat.mmtc[idx["Discard"], idx["Dumps"]]                                                     <- dumps.input_mmtc
-mat.mmtc[idx["Discard"], idx["Landfill, Permanent"]]                                       <- lf.fixed_mmtc
-mat.mmtc[idx["Discard"], idx["Landfill, Decomposing"]]                                     <- (landfill.input_mmtc - lf.fixed_mmtc)
-mat.mmtc[idx["Discard"], idx["Compost"]]                                                   <- compost.input_mmtc
-mat.mmtc[idx["Discard"], idx["Burned"]]                                                    <- bwoec.input_mmtc
-mat.mmtc[idx["Discard"], idx["Recovered"]]                                                <- recov.input_mmtc
-mat.mmtc[idx["Discard"], idx["Discard Energy Capture"]]                                   <- dec.input_mmtc
-
-# Disposal flows → final emissions without EC
-mat.mmtc[idx["Dumps"], idx["Emitted without Energy Capture"]]                              <- dumps.discard_mmtc
-mat.mmtc[idx["Landfill, Decomposing"], idx["Emitted without Energy Capture"]]              <- landfill.discard_mmtc
-mat.mmtc[idx["Compost"], idx["Emitted without Energy Capture"]]                            <- compost.input_mmtc
-mat.mmtc[idx["Burned"], idx["Emitted without Energy Capture"]]                             <- bwoec.input_mmtc
-mat.mmtc[idx["Recovered"], idx["Emitted without Energy Capture"]]                          <- recov.discard_mmtc
-mat.mmtc[idx["Discard Energy Capture"], idx["Emitted without Energy Capture"]]             <- dec.input_mmtc
+# Disposal flows → emissions
+mat.mmtc[idx["Dumps"],                 idx["Emitted without Energy Capture"]] <- dumps.discard_mmtc
+mat.mmtc[idx["Landfill, Decomposing"], idx["Emitted without Energy Capture"]] <- landfill.discard_mmtc
+mat.mmtc[idx["Compost"],               idx["Emitted without Energy Capture"]] <- compost.input_mmtc
+mat.mmtc[idx["Burned"],                idx["Emitted without Energy Capture"]] <- bwoec.input_mmtc
+mat.mmtc[idx["Recovered"],             idx["Emitted without Energy Capture"]] <- recov.discard_mmtc
+mat.mmtc[idx["Discard Energy Capture"],idx["Emitted with Energy Capture"]]    <- dec.input_mmtc              <- dec.input_mmtc
 
 # 5) Don’t prune any real node here – keep all 16 in nodes2
 nodes2 <- nodes
@@ -215,9 +238,9 @@ links <- mat.mmtc %>%
 
 links <- as.data.frame(links)
 
-print(mat.mmtc)
 
-
+subset(links, source=="Imports" & target=="Primary Products = Total Harvest")
+subset(links, source=="Primary Products = Total Harvest" & target=="Exports")
 
 
 

@@ -16,9 +16,22 @@ N.YEARS <- nrow(harv.hwp)   # Number of years in the data set
 N.TPR <- nrow(tpr.hwp)
 N.PPR <- nrow(ppr.hwp)
 N.EUR <- nrow(eur.hwp)            # Number of End Use Ratios
-OWNERSHIP_STARTYEAR <- {if (ncol(harv.hwp) > 2)   # Finding the minimum start year for ownership details. If the data do not include ownership, then only the Totals column start year is used.
-  min(harv.hwp$Year[apply(as.matrix(harv.hwp[,2:(ncol(harv.hwp) - 1)]), 2, function(x) min(which(x > 0)))]) else
-    min(harv.hwp$Year) }
+if (ncol(harv.hwp) > 2) {
+  own_mat <- as.matrix(harv.hwp[, 2:(ncol(harv.hwp) - 1)])  # exclude Year and Total
+  first_pos <- apply(own_mat, 2, function(x) {
+    w <- which(x > 0)
+    if (length(w)) min(w) else NA_integer_
+  })
+  years_first <- harv.hwp$Year[!is.na(first_pos)]
+  years_first <- years_first[match(first_pos[!is.na(first_pos)], seq_len(nrow(harv.hwp)))]
+  if (length(years_first)) {
+    OWNERSHIP_STARTYEAR <- min(years_first, na.rm = TRUE)
+  } else {
+    OWNERSHIP_STARTYEAR <- min(harv.hwp$Year, na.rm = TRUE)
+  }
+} else {
+  OWNERSHIP_STARTYEAR <- min(harv.hwp$Year, na.rm = TRUE)
+}
 STARTYR.POSITION <- which(harv.hwp$Year == OWNERSHIP_STARTYEAR)
 START.YEAR <- min(harv.hwp$Year)
 END.YEAR <- max(harv.hwp$Year)

@@ -87,6 +87,26 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
   eu_array <- array(eu_ratios$MTC, c(N.EUR, N.OWNERSHIP, N.YEARS))      # creating the array (worksheet: CheckEUC)
   dimnames(eu_array) <-  list(c(1:N.EUR), ownership.names, c(min(harv_cf$Year):max(harv_cf$Year)))
   
+  # Build the raw 3-D array first
+  eu_array_raw <- array(eu_ratios$MTC, c(N.EUR, N.OWNERSHIP, N.YEARS))
+  dimnames(eu_array_raw) <- list(
+    as.character(1:N.EUR),
+    ownership.names,
+    as.character(min(harv_cf$Year):max(harv_cf$Year))
+  )
+  
+  # Indices
+  import_idx <- if ("Imports" %in% ownership.names) which(ownership.names == "Imports") else integer(0)
+  export_idx <- if ("Exports" %in% ownership.names) which(ownership.names == "Exports") else integer(0)
+  
+  # Total by year from RAW array
+  import_carbon_mt <- if (length(import_idx)) apply(eu_array_raw[, import_idx, , drop = FALSE], 3, sum) else rep(0, N.YEARS)
+  export_carbon_mt <- if (length(export_idx)) apply(eu_array_raw[, export_idx, , drop = FALSE], 3, sum) else rep(0, N.YEARS)
+  
+  # Working copy for flows: remove Exports from the system for downstream arrays
+  eu_array <- eu_array_raw
+  if (length(export_idx)) eu_array[, export_idx, ] <- 0
+  
   # Subtract Exports from eu_array (carbon removed from system after EUR, before PIU or SWDS)
   export_idx <- if ("Exports" %in% ownership.names) which(ownership.names == "Exports") else NA
   
@@ -100,8 +120,6 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
   
   # Products in Use array (pu_array)
   euhl <- as.matrix(eu_half.lives)   # matrices run much faster in for-loops than data frames or tibbles
-  
-  apply(eu_array, 1, sum)
   
   # Need the discarded products array (dp_array), generated every year from new timber harvest
   eur.pulp <- grep("pulp", ratio_cat$EndUseProduct)      #End use ratio rows for wood pulp 
@@ -260,7 +278,10 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
               pu.final_array = pu.final_array, 
               pu_array = pu_array, 
               recov_array = recov_array, 
-              export_idx = export_idx ))
+              export_idx = export_idx,
+              # add these new ones:
+              import_carbon_mt = import_carbon_mt,
+              export_carbon_mt = export_carbon_mt))
   
 }
 

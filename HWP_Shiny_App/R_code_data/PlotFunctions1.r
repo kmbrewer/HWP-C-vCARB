@@ -154,7 +154,8 @@ HwpModel.Sankey.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion,
                                 hwp.yr, ownership.names, N.EUR, PIU.WOOD.LOSS, PIU.PAPER.LOSS, years, yr.index, ownr.index, d.yrs) {
   
   # Constructing data to place in the End Use Products array
-  a1 <- LT.fcn(harv[1,1], bfcf$Years)       # Alteration of main code.  Only need first year's value since that is only harvest
+  bfcf_years <- if ("EndYear" %in% names(bfcf)) bfcf$EndYear else bfcf$Years
+  a1 <- LT.fcn(harv[1,1], bfcf_years)       # Alteration of main code.  Only need first year's value since that is only harvest
   harv$conv1 <- bfcf$Conversion[a1 + 1]
   harv$conv1 <- ifelse(is.na(harv$conv1) == T,  # If selected years exceed data range, using most recent conversion factor to fill in gaps
                        harv$conv1[max(which(is.na(harv$conv1) == F))], harv$conv1)
@@ -407,8 +408,8 @@ Decay.fcn <- function(empty.array, first.array, target.array, decay.matrix, N.EU
       
       # Safely assign cumsum only if there are non-NA values
       if (all(is.na(target.array[k, j, ]))) next
-      totals.array[k, j, ] <- cumsum(replace(target.array[k, j, ], is.na(target.array[k, j, ]), 0))
-      
+      totals.array[k, j, ] <- cumsum(replace(target.array[k, j, ],
+                                             is.na(target.array[k, j, ]), 0))
       # Ensure first index is valid
       first.year <- first.array[k, j]
       if (is.na(first.year) || first.year < 2 || first.year > N.YEARS) next

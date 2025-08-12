@@ -37,88 +37,47 @@ recov_array <- model.outputs$recov_array
 ownership.names <- dimnames(eu_array)[[2]]
 years_vec <- dimnames(eu_array)[[3]]
 
-# ============================
-# T6.0 - Annual Carbon Exported (MTC)
-# ============================
+# From model outputs (computed on the raw array)
+export_carbon_mt <- model.outputs$export_carbon_mt
+import_carbon_mt <- model.outputs$import_carbon_mt
 
-if (!is.null(export_idx)) {
-  export_carbon_mt <- apply(eu_array[, export_idx, ], 2, sum)
-  
-  t6 <- data.frame(
-    Year = years_vec,
-    Export_C_MTC = as.numeric(export_carbon_mt)
-  )
-  
-  # Remove exports from flow *after* calculating
-  eu_array[, export_idx, ] <- 0
-} else {
-  export_carbon_mt <- rep(0, length(years_vec))  # Ensure it's defined
-  t6 <- data.frame(
-    Year = years_vec,
-    Export_C_MTC = export_carbon_mt
-  )
-}
+years_dim <- dimnames(eu_array)[[3]]
 
-# ============================
-# T6.1 - Cumulative Carbon Exported (MTC)
-# ============================
-
-t6.1 <- data.frame(
-  Year = years_vec,
-  Export_Cumulative_MTC = cumsum(export_carbon_mt)
+# T6.0 – Annual Exports (MTC)
+t6 <- data.frame(
+  Year = years_dim,
+  Export_C_MTC = as.numeric(export_carbon_mt)
 )
 
-# ============================
-# T6.2 - Percent of Total EUR Assigned to Exports
-# ============================
+# T6.1 – Cumulative Exports
+t6.1 <- data.frame(
+  Year = years_dim,
+  Export_Cumulative_MTC = as.numeric(cumsum(export_carbon_mt))
+)
 
-total_carbon_by_year <- apply(eu_array, 3, sum) + export_carbon_mt  # Include exports in denominator
-
-export_percent <- 100 * (export_carbon_mt / total_carbon_by_year)
-export_percent[is.nan(export_percent)] <- 0
-
+# T6.2 – Exports as % of total EUR (add exports back to the total because eu_array has them zeroed)
+total_carbon_by_year <- apply(eu_array, 3, sum) + export_carbon_mt
+export_percent <- ifelse(total_carbon_by_year > 0, 100 * export_carbon_mt / total_carbon_by_year, 0)
 t6.2 <- data.frame(
-  Year = years_vec,
+  Year = years_dim,
   Export_Percent_of_Total_EUR = round(export_percent, 2)
 )
 
-# ============================
-# T7.0 - Annual Carbon Imported (MTC)
-# ============================
-
-if ("Imports" %in% ownership.names) {
-  import_idx <- which(ownership.names == "Imports")
-  import_carbon_mt <- apply(eu_array[, import_idx, ], 2, sum)
-  
-  t7 <- data.frame(
-    Year = years_vec,
-    Import_C_MTC = as.numeric(import_carbon_mt)
-  )
-} else {
-  import_carbon_mt <- rep(0, length(years_vec))
-  t7 <- data.frame(
-    Year = years_vec,
-    Import_C_MTC = import_carbon_mt
-  )
-}
-
-# ============================
-# T7.1 - Cumulative Carbon Imported (MTC)
-# ============================
-
-t7.1 <- data.frame(
-  Year = years_vec,
-  Import_Cumulative_MTC = cumsum(import_carbon_mt)
+# T7.0 – Annual Imports (MTC)
+t7 <- data.frame(
+  Year = years_dim,
+  Import_C_MTC = as.numeric(import_carbon_mt)
 )
 
-# ============================
-# T7.2 - Percent of Total EUR Assigned to Imports
-# ============================
+# T7.1 – Cumulative Imports
+t7.1 <- data.frame(
+  Year = years_dim,
+  Import_Cumulative_MTC = as.numeric(cumsum(import_carbon_mt))
+)
 
-import_percent <- 100 * (import_carbon_mt / total_carbon_by_year)
-import_percent[is.nan(import_percent)] <- 0
-
+# T7.2 – Imports as % of total EUR
+import_percent <- ifelse(total_carbon_by_year > 0, 100 * import_carbon_mt / total_carbon_by_year, 0)
 t7.2 <- data.frame(
-  Year = years_vec,
+  Year = years_dim,
   Import_Percent_of_Total_EUR = round(import_percent, 2)
 )
