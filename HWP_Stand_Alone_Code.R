@@ -252,6 +252,8 @@ if (GENERATE.SANKEY == TRUE) {
                 Source = "IDsource", Target = "IDtarget",
                 Value = "value", NodeID = "name",
                 fontSize = 12,
+                nodeWidth = 15,        # default ~15
+                nodePadding = 10,       # default ~10 (lower = taller nodes)
                 sinksRight = TRUE)
 }
 

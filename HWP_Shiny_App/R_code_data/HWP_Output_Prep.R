@@ -33,51 +33,77 @@ pu.final_array <- model.outputs$pu.final_array
 pu_array <- model.outputs$pu_array
 recov_array <- model.outputs$recov_array
 
-# Get ownership names and years
+# Get ownership names and years from the arrays we definitely have
 ownership.names <- dimnames(eu_array)[[2]]
-years_vec <- dimnames(eu_array)[[3]]
+years_dim <- as.numeric(dimnames(eu_array)[[3]])
+n_years <- length(years_dim)
 
-# From model outputs (computed on the raw array)
-export_carbon_mt <- model.outputs$export_carbon_mt
-import_carbon_mt <- model.outputs$import_carbon_mt
+# Safe getter: if the model didn’t return the vectors, use zeros of the right length
+get_or_zero <- function(x, n) {
+  if (!is.null(x) && length(x) == n) as.numeric(x) else rep(0, n)
+}
 
-years_dim <- dimnames(eu_array)[[3]]
+# Prefer the raw vectors computed inside HwpModel.fcn (based on eu_array_raw)
+export_carbon_mt <- get_or_zero(model.outputs$export_carbon_mt, n_years)
+import_carbon_mt <- get_or_zero(model.outputs$import_carbon_mt, n_years)
 
+# If those were missing AND we have an Exports/Imports ownership in eu_array, try to compute from eu_array.
+# NOTE: If your HwpModel.fcn zeros the Exports column in eu_array (recommended), this will remain zeros—and that’s OK,
+# because export_carbon_mt above (from model.outputs) is the authoritative source.
+if (all(export_carbon_mt == 0) && "Exports" %in% ownership.names) {
+  exports_in_eu <- apply(eu_array[, ownership.names == "Exports", , drop = FALSE], 3, sum)
+  if (sum(exports_in_eu) > 0) export_carbon_mt <- as.numeric(exports_in_eu)
+}
+if (all(import_carbon_mt == 0) && "Imports" %in% ownership.names) {
+  imports_in_eu <- apply(eu_array[, ownership.names == "Imports", , drop = FALSE], 3, sum)
+  if (sum(imports_in_eu) > 0) import_carbon_mt <- as.numeric(imports_in_eu)
+}
+
+# Build a denominator that avoids double-counting exports:
+# total EUR = (everything in eu_array) - (exports already in eu_array, if any) + (authoritative exports vector)
+eu_total <- apply(eu_array, 3, sum)
+exports_in_eu <- if ("Exports" %in% ownership.names)
+  apply(eu_array[, ownership.names == "Exports", , drop = FALSE], 3, sum) else rep(0, n_years)
+
+total_carbon_by_year <- eu_total - exports_in_eu + export_carbon_mt
+
+# -------- Tables --------
 # T6.0 – Annual Exports (MTC)
 t6 <- data.frame(
   Year = years_dim,
-  Export_C_MTC = as.numeric(export_carbon_mt)
+  Export_C_MTC = export_carbon_mt
 )
 
 # T6.1 – Cumulative Exports
 t6.1 <- data.frame(
   Year = years_dim,
-  Export_Cumulative_MTC = as.numeric(cumsum(export_carbon_mt))
+  Export_Cumulative_MTC = cumsum(export_carbon_mt)
 )
 
-# T6.2 – Exports as % of total EUR (add exports back to the total because eu_array has them zeroed)
-total_carbon_by_year <- apply(eu_array, 3, sum) + export_carbon_mt
-export_percent <- ifelse(total_carbon_by_year > 0, 100 * export_carbon_mt / total_carbon_by_year, 0)
+# T6.2 – Exports as % of total EUR
 t6.2 <- data.frame(
   Year = years_dim,
-  Export_Percent_of_Total_EUR = round(export_percent, 2)
+  Export_Percent_of_Total_EUR = ifelse(total_carbon_by_year > 0,
+                                       round(100 * export_carbon_mt / total_carbon_by_year, 2),
+                                       0)
 )
 
 # T7.0 – Annual Imports (MTC)
 t7 <- data.frame(
   Year = years_dim,
-  Import_C_MTC = as.numeric(import_carbon_mt)
+  Import_C_MTC = import_carbon_mt
 )
 
 # T7.1 – Cumulative Imports
 t7.1 <- data.frame(
   Year = years_dim,
-  Import_Cumulative_MTC = as.numeric(cumsum(import_carbon_mt))
+  Import_Cumulative_MTC = cumsum(import_carbon_mt)
 )
 
 # T7.2 – Imports as % of total EUR
-import_percent <- ifelse(total_carbon_by_year > 0, 100 * import_carbon_mt / total_carbon_by_year, 0)
 t7.2 <- data.frame(
   Year = years_dim,
-  Import_Percent_of_Total_EUR = round(import_percent, 2)
+  Import_Percent_of_Total_EUR = ifelse(total_carbon_by_year > 0,
+                                       round(100 * import_carbon_mt / total_carbon_by_year, 2),
+                                       0)
 )
