@@ -129,75 +129,93 @@ recov.discard_mmtc <- sum(hwp.sankey.output$recov.discard_matrix[, 1:d.yrs])
 ewoec_mmtc <- sum(swds.discard_mmtc, bwoec.input_mmtc, compost.input_mmtc, recov.discard_mmtc)
 # Correct check = landfill/dump/recov yrs 2 & 3, bwoec/compost yrs 1 & 2
 
-# Define nodes 
-nodes <- data.frame(name = c("Imports", "Primary Products = Total Harvest", "Emitted with Energy Capture", "Products in Use", "Loss When Wood Placed Into End Uses", 
-                             "Loss When Pulp Placed Into End Uses",   "Discard", "Dumps", "Landfill, Permanent", 
-                             "Landfill, Decomposing", "Compost", "Burned", "Recovered", "Emitted without\nEnergy Capture", "Discard Energy Capture", "Exports"))
+# 1) Define the 16 Sankey nodes in order
+nodes <- data.frame(name = c(
+  "Imports",
+  "Primary Products = Total Harvest",
+  "Emitted with Energy Capture",
+  "Products in Use",
+  "Loss When Wood Placed Into End Uses",
+  "Loss When Pulp Placed Into End Uses",
+  "Discard",
+  "Dumps",
+  "Landfill, Permanent",
+  "Landfill, Decomposing",
+  "Compost",
+  "Burned",
+  "Recovered",
+  "Emitted without Energy Capture",
+  "Discard Energy Capture",
+  "Exports"
+))
 
-# Initialize matrix
-mat.mmtc <- matrix(0, nrow = length(nodes$name), ncol = length(nodes$name))
+# 2) Create a name→index lookup
+idx <- setNames(seq_len(nrow(nodes)), nodes$name)
 
-# Row/column indices for Imports and Exports
-imports_row <- which(nodes$name == "Imports")
-primary_row <- which(nodes$name == "Primary Products = Total Harvest")
-exports_col <- which(nodes$name == "Exports")
+# 3) Initialize an empty 16×16 matrix
+mat.mmtc <- matrix(0, nrow = 16, ncol = 16)
+
+# 4) Fill in the flows by name, one link at a time
 
 # Imports → Primary Products
-mat.mmtc[imports_row, primary_row] <- imports_mmtc
+mat.mmtc[idx["Imports"], idx["Primary Products = Total Harvest"]] <- imports_mmtc
 
-# Primary Products → All downstream flows
-mat.mmtc[primary_row, ] <- c(
-  0,                     # Imports (no backflow)
-  0,                     # Primary Products
-  eec_mmtc,              # Emitted with Energy Capture
-  eu.reduced_mmtc,       # Products in Use
-  dp.wood_mmtc,          # Loss when wood placed into end uses
-  dp.paper_mmtc,         # Loss when pulp placed into end uses
-  0, 0, 0, 0, 0, 0, 0, 0, 0,
-  exports_mmtc           # Exports terminal flow
-)
+# Primary Products → its downstream uses
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Emitted with Energy Capture"]]    <- eec_mmtc
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Products in Use"]]                 <- eu.reduced_mmtc
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Loss When Wood Placed Into End Uses"]] <- dp.wood_mmtc
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Loss When Pulp Placed Into End Uses"]] <- dp.paper_mmtc
+mat.mmtc[idx["Primary Products = Total Harvest"], idx["Exports"]]                         <- exports_mmtc
 
-# Continue original matrix row assignments
-mat.mmtc[3,] <- c(0, 0, 0, 0, 0, pu.discard_mmtc, 0, 0, 0, 0, 0, 0, 0, 0)
-mat.mmtc[4,] <- c(0, 0, 0, 0, 0, dp.wood_mmtc, 0, 0, 0, 0, 0, 0, 0, 0)
-mat.mmtc[5,] <- c(0, 0, 0, 0, 0, dp.paper_mmtc,  0, 0, 0, 0, 0, 0, 0, 0)
-mat.mmtc[6,] <- c(0, 0, 0, 0, 0, 0, dumps.input_mmtc,	lf.fixed_mmtc,	(landfill.input_mmtc - lf.fixed_mmtc), compost.input_mmtc, bwoec.input_mmtc, recov.input_mmtc, 0, dec.input_mmtc)
-mat.mmtc[7,] <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, dumps.discard_mmtc, 0)
-mat.mmtc[8,] <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-mat.mmtc[9,] <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, landfill.discard_mmtc, 0)
-mat.mmtc[10,] <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, compost.input_mmtc, 0)
-mat.mmtc[11,] <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, bwoec.input_mmtc, 0)
-mat.mmtc[12,] <- c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, recov.discard_mmtc, 0)
-mat.mmtc[13,] <- c(0, dec.input_mmtc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)          # Need to reorganize columns
+# Products in Use → Discard
+mat.mmtc[idx["Products in Use"], idx["Discard"]]                                          <- pu.discard_mmtc
 
-nodes.zero <- which(apply(mat.mmtc, 1, sum) + apply(mat.mmtc, 2, sum) == 0)
+# Wood Loss → Discard
+mat.mmtc[idx["Loss When Wood Placed Into End Uses"], idx["Discard"]]                       <- dp.wood_mmtc
+
+# Pulp Loss → Discard
+mat.mmtc[idx["Loss When Pulp Placed Into End Uses"], idx["Discard"]]                       <- dp.paper_mmtc
+
+# Discard → immediate disposal fates
+mat.mmtc[idx["Discard"], idx["Dumps"]]                                                     <- dumps.input_mmtc
+mat.mmtc[idx["Discard"], idx["Landfill, Permanent"]]                                       <- lf.fixed_mmtc
+mat.mmtc[idx["Discard"], idx["Landfill, Decomposing"]]                                     <- (landfill.input_mmtc - lf.fixed_mmtc)
+mat.mmtc[idx["Discard"], idx["Compost"]]                                                   <- compost.input_mmtc
+mat.mmtc[idx["Discard"], idx["Burned"]]                                                    <- bwoec.input_mmtc
+mat.mmtc[idx["Discard"], idx["Recovered"]]                                                <- recov.input_mmtc
+mat.mmtc[idx["Discard"], idx["Discard Energy Capture"]]                                   <- dec.input_mmtc
+
+# Disposal flows → final emissions without EC
+mat.mmtc[idx["Dumps"], idx["Emitted without Energy Capture"]]                              <- dumps.discard_mmtc
+mat.mmtc[idx["Landfill, Decomposing"], idx["Emitted without Energy Capture"]]              <- landfill.discard_mmtc
+mat.mmtc[idx["Compost"], idx["Emitted without Energy Capture"]]                            <- compost.input_mmtc
+mat.mmtc[idx["Burned"], idx["Emitted without Energy Capture"]]                             <- bwoec.input_mmtc
+mat.mmtc[idx["Recovered"], idx["Emitted without Energy Capture"]]                          <- recov.discard_mmtc
+mat.mmtc[idx["Discard Energy Capture"], idx["Emitted without Energy Capture"]]             <- dec.input_mmtc
+
+# 5) Don’t prune any real node here – keep all 16 in nodes2
+nodes2 <- nodes
+
+# Now you can continue with your link‐building:
+colnames(mat.mmtc) <- rownames(mat.mmtc) <- nodes2$name
+links <- mat.mmtc %>%
+  as.data.frame() %>%
+  rownames_to_column("source") %>%
+  pivot_longer(-source, names_to="target", values_to="value") %>%
+  filter(value>0) %>%
+  mutate(
+    IDsource = match(source, nodes2$name)-1,
+    IDtarget = match(target, nodes2$name)-1
+  )
 
 #if (input$metrictype == "2") {    # Changing MMT C / Tg C values to CO2e if Tg CO2e selected
 #  mat.mmtc <- mat.mmtc * 44/12   
 #}
 
-if (length(nodes.zero) > 0) {
-  mat.mmtc <- mat.mmtc[-nodes.zero, -nodes.zero]
-  nodes2 <- data.frame(name = nodes$name[-nodes.zero])
-} else {
-  nodes2 <- nodes
-}
-
-colnames(mat.mmtc) = rownames(mat.mmtc) = nodes2$name
-
-links <- mat.mmtc %>% 
-  as.data.frame() %>% 
-  rownames_to_column(var = "source") %>% 
-  pivot_longer(cols = 2:(length(nodes2$name) + 1), names_to = "target", values_to = "value") %>%
-  filter(value != 0)
-
-
-links$IDsource <- match(links$source, nodes2$name) - 1 
-links$IDtarget <- match(links$target, nodes2$name) - 1
 
 links <- as.data.frame(links)
 
-
+print(mat.mmtc)
 
 
 

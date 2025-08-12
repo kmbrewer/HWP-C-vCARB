@@ -43,15 +43,14 @@ chattr::chattr_use(
   model = "gpt-4",
   )
 chattr::chattr_app()
-file_content <- readLines("HWP_Stand_Alone_Code.R")
-chattr::chat(paste(file_content, collapse = "\n"))
 
-usethis::edit_r_environ()
+
+
 
 ##########################################################################
 ###  Constants specific to the stand-alone version of the model
 GENERATE.SANKEY <- TRUE       # Set to FALSE if you do not want the code to generate a Sankey diagram.
-SANKEY.HARVEST.YEAR <- 1960   # Set to any year within your data range.
+SANKEY.HARVEST.YEAR <- 2020   # Set to any year within your data range.
 SANKEY.YEARS.OF.DECAY <- 30    # Set to any number between 3 and 100.
 
 ### Folder locations
@@ -252,17 +251,20 @@ if (GENERATE.SANKEY == TRUE) {
   sankeyNetwork(Links = links, Nodes = nodes2,
                 Source = "IDsource", Target = "IDtarget",
                 Value = "value", NodeID = "name",
-                fontSize = 14,
-                sinksRight = FALSE)
+                fontSize = 12,
+                sinksRight = TRUE)
 }
 
 
+if (GENERATE.SANKEY == TRUE) {
 print(ownership.names)
+print(dim(mat.mmtc))         # should be 16 16
+print(nodes$name)            # should list 16 labels, starting with "Imports" and ending with "Exports"
+print(head(links))         # first few source→target→value rows
+}
+
 sum(model.outputs$eu_array[, which(ownership.names == "Exports"), ])
 sum(model.outputs$eu_array[, which(ownership.names == "Imports"), ])
-
-
-
 
 
 
