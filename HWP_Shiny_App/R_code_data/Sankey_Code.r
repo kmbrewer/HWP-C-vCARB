@@ -1,7 +1,29 @@
 # --- Build reduced inputs for the Sankey horizon ---
-harv.red.hwp <- data.frame(Year = (hwp.yr + (0:(d.yrs - 1))), name = 0)
-colnames(harv.red.hwp)[2] <- eval(ownr.sel)
-harv.red.hwp[1, 2] <- harv.hwp[harv.hwp$Year == hwp.yr, ownr.index + 1]
+# --- Domestic harvest only (exclude Imports/Exports) for the Sankey mini-run ---
+yr_row <- which(harv.hwp$Year == hwp.yr)
+
+owner_cols <- setdiff(names(harv.hwp), c("Year", "Total", "Imports", "Exports"))
+if (length(owner_cols)) {
+  # Best source: sum the explicit ownership columns (State/Private/etc.)
+  domestic_mbf <- sum(as.numeric(harv.hwp[yr_row, owner_cols, drop = FALSE]), na.rm = TRUE)
+} else {
+  # Fallback: if you only have Total (+ maybe Imports/Exports), subtract them
+  total_mbf   <- as.numeric(harv.hwp[yr_row, "Total"])
+  imports_mbf <- if ("Imports" %in% names(harv.hwp)) as.numeric(harv.hwp[yr_row, "Imports"]) else 0
+  exports_mbf <- if ("Exports" %in% names(harv.hwp)) as.numeric(harv.hwp[yr_row, "Exports"]) else 0
+  # If Total includes I/E, this removes I/E; if it doesn't, the owner_cols branch above would have been used.
+  domestic_mbf <- total_mbf - imports_mbf - exports_mbf
+  domestic_mbf <- max(domestic_mbf, 0)
+}
+
+# Keep the column name as your selection (usually "Total") so downstream joins don't break
+colname <- ownr.sel
+harv.red.hwp <- data.frame(Year = (hwp.yr + (0:(d.yrs - 1))), tmp = 0)
+names(harv.red.hwp)[2] <- colname
+harv.red.hwp[1, colname] <- domestic_mbf
+
+# Optional: sanity print
+# message(sprintf("Sankey %d — Domestic harvest MBF = %.0f (excl. Imports/Exports)", hwp.yr, domestic_mbf))
 
 tpr.red.hwp <- tpr.hwp[, c(1, yr.index + 1)]
 ppr.red.hwp <- ppr.hwp[, c(1, yr.index + 1)]
@@ -214,10 +236,9 @@ links <- mat.mmtc |>
     IDtarget = match(target, nodes2$name) - 1
   )
 
-# message(sprintf("Year %d — Harvest(primary)=%.3f, Imports=%.3f, Exports=%.3f; Import share of supply=%.1f%%",
-                #hwp.yr, eur_mmtc, imports_mmtc, exports_mmtc,
-                #100*imports_mmtc/max(1e-12, eur_mmtc + imports_mmtc)))
-
+# Quick checks you can print once
+# message(sprintf("Primary inflow %d: Harvest=%.3f, Imports=%.3f, Import share=%.1f%%",hwp.yr, eur_mmtc, imports_mmtc, 100 * imports_mmtc / pmax(1e-12, eur_mmtc + imports_mmtc)))
+# message(sprintf("Primary outflow raw vs target: %.3f vs %.3f (scale=%.4f)",primary_out_raw, primary_target, scale_factor))
 
 # Optional quick checks (comment out if noisy):
 # message(sprintf("Primary inflow: %0.3f  |  outflow: %0.3f",
