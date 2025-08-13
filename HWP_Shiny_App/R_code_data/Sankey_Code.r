@@ -50,8 +50,20 @@ yr_col <- match(hwp.yr, years)
 # Use imports/exports from model.outputs (computed on the raw eu_array)
 imports_mmtc <- if (!is.null(model.outputs$import_carbon_mt) && !is.na(yr_col)) as.numeric(model.outputs$import_carbon_mt[yr_col]) else 0
 exports_mmtc <- if (!is.null(model.outputs$export_carbon_mt) && !is.na(yr_col)) as.numeric(model.outputs$export_carbon_mt[yr_col]) else 0
-imports_mmtc[is.na(imports_mmtc)] <- 0
+
+# After yr_col <- match(hwp.yr, years)
+imports_mmtc <- if (!is.null(model.outputs$import_carbon_mt) && !is.na(yr_col))
+  as.numeric(model.outputs$import_carbon_mt[yr_col]) else 0
+
+# Fallback if that was missing/zero, but the ownership exists in the array:
+if ((is.na(imports_mmtc) || imports_mmtc == 0) && "Imports" %in% dimnames(model.outputs$eu_array)[[2]]) {
+  imports_mmtc <- sum(model.outputs$eu_array[, "Imports", yr_col], na.rm = TRUE)
+}
+
+exports_mmtc <- if (!is.null(model.outputs$export_carbon_mt) && !is.na(yr_col))
+  as.numeric(model.outputs$export_carbon_mt[yr_col]) else 0
 exports_mmtc[is.na(exports_mmtc)] <- 0
+imports_mmtc[is.na(imports_mmtc)] <- 0
 
 # --- Core flows from the minimized run (harvest-only this year) ---
 eur_mmtc        <- sum(hwp.sankey.output$eu_matrix[, 1])                  # total primary products this year (Harvest)
@@ -117,8 +129,9 @@ dumps_mmtc          <- dumps_mmtc          * scale_factor
 swds_mmtc           <- swds_mmtc           * scale_factor
 recov_mmtc          <- recov_mmtc          * scale_factor
 
-# --- Define 16 Sankey nodes in order ---
+# --- Define 17 Sankey nodes in order ---
 nodes <- data.frame(name = c(
+  "Harvest",                    
   "Imports",
   "Primary Products",
   "Emitted with Energy Capture",
@@ -137,18 +150,16 @@ nodes <- data.frame(name = c(
   "Exports"
 ))
 
-# Name → index lookup
 idx <- setNames(seq_len(nrow(nodes)), nodes$name)
+n_nodes <- nrow(nodes)
+mat.mmtc <- matrix(0, nrow = n_nodes, ncol = n_nodes)
+rownames(mat.mmtc) <- colnames(mat.mmtc) <- nodes$name
 
-# Initialize empty 16×16 matrix
-mat.mmtc <- matrix(0, nrow = 16, ncol = 16)
+# Inflows to Primary: Harvest and Imports
+mat.mmtc[idx["Harvest"],  idx["Primary Products"]] <- eur_mmtc
+mat.mmtc[idx["Imports"],  idx["Primary Products"]] <- imports_mmtc
 
-# --- Fill the flow matrix ---
-
-# Imports → Primary
-mat.mmtc[idx["Imports"], idx["Primary Products"]] <- imports_mmtc
-
-# Primary → downstream (note: EEC here is fuel only; DEC is routed below from "Discard Energy Capture")
+# Primary → downstream (keep your values as before)
 mat.mmtc[idx["Primary Products"], idx["Emitted with Energy Capture"]]         <- eec_mmtc
 mat.mmtc[idx["Primary Products"], idx["Products in Use"]]                     <- eu.reduced_mmtc
 mat.mmtc[idx["Primary Products"], idx["Loss When Wood Placed Into End Uses"]] <- dp.wood_mmtc
@@ -165,17 +176,17 @@ mat.mmtc[idx["Discard"], idx["Dumps"]]                 <- dumps.input_mmtc
 mat.mmtc[idx["Discard"], idx["Landfill, Permanent"]]   <- lf.fixed_mmtc
 mat.mmtc[idx["Discard"], idx["Landfill, Decomposing"]] <- (landfill.input_mmtc - lf.fixed_mmtc)
 mat.mmtc[idx["Discard"], idx["Compost"]]               <- compost.input_mmtc
-mat.mmtc[idx["Discard"], idx["Burned"]]                <- bwoec.input_mmtc          # burned without EC
+mat.mmtc[idx["Discard"], idx["Burned"]]                <- bwoec.input_mmtc
 mat.mmtc[idx["Discard"], idx["Recovered"]]             <- recov.input_mmtc
-mat.mmtc[idx["Discard"], idx["Discard Energy Capture"]] <- dec.input_mmtc           # burned with EC
+mat.mmtc[idx["Discard"], idx["Discard Energy Capture"]] <- dec.input_mmtc
 
-# Disposal flows → final emissions without/with EC
+# Disposal → emissions
 mat.mmtc[idx["Dumps"],                 idx["Emitted without Energy Capture"]] <- dumps.discard_mmtc
 mat.mmtc[idx["Landfill, Decomposing"], idx["Emitted without Energy Capture"]] <- landfill.discard_mmtc
 mat.mmtc[idx["Compost"],               idx["Emitted without Energy Capture"]] <- compost.input_mmtc
 mat.mmtc[idx["Burned"],                idx["Emitted without Energy Capture"]] <- bwoec.input_mmtc
 mat.mmtc[idx["Recovered"],             idx["Emitted without Energy Capture"]] <- recov.discard_mmtc
-mat.mmtc[idx["Discard Energy Capture"], idx["Emitted with Energy Capture"]]   <- dec.input_mmtc
+mat.mmtc[idx["Discard Energy Capture"],idx["Emitted with Energy Capture"]]    <- dec.input_mmtc
 
 # ---- Name, prune, and build links once ----
 rownames(mat.mmtc) <- nodes$name
@@ -187,15 +198,14 @@ links_long <- as.data.frame(mat.mmtc) |>
   tidyr::pivot_longer(-source, names_to = "target", values_to = "value") |>
   dplyr::filter(value > 0)
 
-# Keep only nodes that actually participate
-keep_names <- unique(c(links_long$source, links_long$target))
-nodes2 <- nodes[nodes$name %in% keep_names, , drop = FALSE]
-
-# Reorder/prune the matrix to the kept names (preserves original order)
+# Drop nodes with zero total in+out
+used <- (rowSums(mat.mmtc) > 0) | (colSums(mat.mmtc) > 0)
+nodes2 <- nodes[used, , drop = FALSE]
 mat.mmtc <- mat.mmtc[nodes2$name, nodes2$name, drop = FALSE]
 
-# Final Links with 0-based ids for networkD3
-links <- as.data.frame(mat.mmtc) |>
+# Build links
+links <- mat.mmtc |>
+  as.data.frame() |>
   tibble::rownames_to_column("source") |>
   tidyr::pivot_longer(-source, names_to = "target", values_to = "value") |>
   dplyr::filter(value > 0) |>
@@ -203,6 +213,10 @@ links <- as.data.frame(mat.mmtc) |>
     IDsource = match(source, nodes2$name) - 1,
     IDtarget = match(target, nodes2$name) - 1
   )
+
+# message(sprintf("Year %d — Harvest(primary)=%.3f, Imports=%.3f, Exports=%.3f; Import share of supply=%.1f%%",
+                #hwp.yr, eur_mmtc, imports_mmtc, exports_mmtc,
+                #100*imports_mmtc/max(1e-12, eur_mmtc + imports_mmtc)))
 
 
 # Optional quick checks (comment out if noisy):
