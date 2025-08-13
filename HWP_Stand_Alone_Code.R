@@ -1,3 +1,5 @@
+# HWP_Stand_Alone_Code.R
+
 ### HWP Carbon Fate Modeling in R
 ### Author: Jeremy Groom, Groom Analytics LLC
 ###  April 2022
@@ -36,14 +38,6 @@ library(lhs)        # Latin Hypercube Sampling
 library(networkD3)   # Sankey diagram
 
 library(usethis)
-library(chattr)
-
-chattr::chattr_use(
-  provider = "openai",
-  model = "gpt-4",
-  )
-chattr::chattr_app()
-
 
 
 
@@ -241,35 +235,106 @@ if (hwp.model.options$RUN.MC == TRUE) {
 ## Produce a savable version of the Sankey diagram ("Fate of Harvest Carbon").  To save from RStudio, run following code,
 #   click "export" in the viewer window, select "Save as Image...", and modify the position of Sankey objects within the 
 #    Save window before saving.
+
+
+# --- single-year Sankey ---
 if (GENERATE.SANKEY == TRUE) {
-  hwp.yr <- SANKEY.HARVEST.YEAR
-  d.yrs <- SANKEY.YEARS.OF.DECAY
+  hwp.yr   <- SANKEY.HARVEST.YEAR
+  d.yrs    <- SANKEY.YEARS.OF.DECAY
   ownr.sel <- "Total"
   ownr.index <- which(ownership.names == ownr.sel)
-  yr.index <- which(years == hwp.yr)
-  source(paste0(SHINY.CODE, "Sankey_Code.r"), local = TRUE)
-  sankeyNetwork(Links = links, Nodes = nodes2,
-                Source = "IDsource", Target = "IDtarget",
-                Value = "value", NodeID = "name",
-                fontSize = 12,
-                nodeWidth = 15,        # default ~15
-                nodePadding = 10,       # default ~10 (lower = taller nodes)
-                sinksRight = TRUE)
+  yr.index <- match(hwp.yr, years)
+  
+  # Source Sankey_Code.r into a sandbox environment
+  s_env <- new.env(parent = environment())  # parent sees all your objects above
+  sys.source(file.path(SHINY.CODE, "Sankey_Code.r"), envir = s_env)
+  
+  message(sprintf("[Sankey %d] links rows = %d, nodes = %d",
+                  hwp.yr, nrow(s_env$links), nrow(s_env$nodes2)))
+  
+  # Check in the correct environment
+  if (!exists("links", envir = s_env) || !is.data.frame(s_env$links) || !nrow(s_env$links)) {
+    stop(sprintf("Sankey_Code.r did not produce any links/nodes for year %s", hwp.yr))
+  }
+  
+  # ALWAYS print htmlwidgets in scripts
+  p_single <- networkD3::sankeyNetwork(
+    Links = s_env$links, Nodes = s_env$nodes2,
+    Source = "IDsource", Target = "IDtarget",
+    Value  = "value",     NodeID = "name",
+    fontSize = 12, nodeWidth = 15, nodePadding = 10, sinksRight = TRUE
+  )
+  print(p_single)
 }
 
 
+
+################### SUM MULTIPLE SINGLE-YEAR SANKEYS (variable horizon, with diagnostics) ####################
 if (GENERATE.SANKEY == TRUE) {
-print(ownership.names)
-print(dim(mat.mmtc))         # should be 16 16
-print(nodes$name)            # should list 16 labels, starting with "Imports" and ending with "Exports"
-print(head(links))         # first few source→target→value rows
+  
+  # ---- choose the span to aggregate ----
+  requested_years <- 2001:2023
+  valid_years <- intersect(requested_years, years)
+  AGG_END_YEAR <- max(valid_years)
+  
+  empty_links <- data.frame(source = character(0),
+                            target = character(0),
+                            value  = numeric(0))
+  
+  build_one_year <- function(y, end_year = AGG_END_YEAR) {
+    # Per-year inputs expected by Sankey_Code.r
+    hwp.yr   <- y
+    yr.index <- match(hwp.yr, years)
+    if (is.na(yr.index)) return(empty_links)
+    
+    # Variable horizon: only simulate up to the common end year
+    d.yrs    <- max(1L, end_year - y + 1L)
+    ownr.sel <- "Total"
+    ownr.index <- which(ownership.names == ownr.sel)
+    
+    # Sandbox just for this year
+    s_env <- new.env(parent = environment())
+    sys.source(file.path(SHINY.CODE, "Sankey_Code.r"), envir = s_env)
+    
+    if (!exists("links") || !is.data.frame(links) || !nrow(links)) {
+      stop(sprintf("Sankey_Code.r did not produce any links/nodes for year %s", hwp.yr))
+    }
+    
+    if (!is.data.frame(s_env$links) || !nrow(s_env$links)) return(empty_links)
+    s_env$links[, c("source", "target", "value")]
+  }
+  
+  links_agg <- do.call(rbind, lapply(valid_years, build_one_year)) |>
+    dplyr::group_by(source, target) |>
+    dplyr::summarise(value = sum(value, na.rm = TRUE), .groups = "drop") |>
+    dplyr::filter(value > 0)
+  
+  nodes2 <- data.frame(name = sort(unique(c(links_agg$source, links_agg$target))),
+                       stringsAsFactors = FALSE)
+  links_agg <- links_agg |>
+    dplyr::mutate(
+      IDsource = match(source, nodes2$name) - 1L,
+      IDtarget = match(target, nodes2$name) - 1L
+    )
+  
+  networkD3::sankeyNetwork(
+    Links = links_agg, Nodes = nodes2,
+    Source = "IDsource", Target = "IDtarget",
+    Value  = "value",   NodeID = "name",
+    fontSize = 12, nodeWidth = 15, nodePadding = 10, sinksRight = TRUE
+  )
+}
+
+# Sankey QC checks
+if (GENERATE.SANKEY == TRUE) {
+  print(ownership.names)
+  print(dim(mat.mmtc))         # should be 17 out of 17
+  print(nodes$name)            # should list 17 labels, starting with "Harvest," then Imports," and ending with "Exports"
+  print(head(links))         # first few source→target→value rows
 }
 
 sum(model.outputs$eu_array[, which(ownership.names == "Exports"), ])
 sum(model.outputs$eu_array[, which(ownership.names == "Imports"), ])
-
-
-
 
 
 

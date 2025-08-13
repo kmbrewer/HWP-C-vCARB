@@ -108,36 +108,41 @@ ggplot_pic <- function(img){
 
 #### Sankey diagram functions, Figure 9 ######
 rep.val.fcn <- function(ratio.hwp, hwpyr, dyrs) {
-  dup.x <- ratio.hwp
-  for(i in 1:(dyrs - 1)) {
-    dup.x <- rbind(dup.x, ratio.hwp)
-  }
-  dup.x$Year <- rep(seq(hwpyr, hwpyr + (dyrs - 1), 1), each = nrow(ratio.hwp))
+  if (dyrs < 1) stop("dyrs must be >= 1")
+  
+  n0 <- nrow(ratio.hwp)
+  
+  # replicate the rows exactly dyrs times, even when dyrs == 1
+  dup.x <- ratio.hwp[rep(seq_len(n0), times = dyrs), , drop = FALSE]
+  
+  # assign the correct Year for each block
+  dup.x$Year <- rep(seq.int(from = hwpyr, length.out = dyrs, by = 1), each = n0)
+  
   dup.x
 }
 
 
 
 ## Update to decay.fcn for Sankey diagram.  Running in advance of the loop
-decay.fcn.s <- function(target.matrix, decay.vals, n.eur, dyrs) {                  # Previously Defined
-  decay.matrix <- totals.matrix <- discard.matrix1.5 <- matrix(0, nrow = n.eur, ncol = dyrs)    
-  decay.matrix[, 1] <- target.matrix[, 1]   # The first year = initial values
-  for(k in 1:n.eur) {  
+decay.fcn.s <- function(target.matrix, decay.vals, n.eur, dyrs) {
+  decay.matrix <- totals.matrix <- discard.matrix1.5 <- matrix(0, nrow = n.eur, ncol = dyrs)
+  decay.matrix[, 1] <- target.matrix[, 1]
+  for (k in 1:n.eur) {
     totals.matrix[k, ] <- cumsum(target.matrix[k, ])
-    
-    for(i in 2:dyrs) {
-      decay.matrix[k, i] <- as.numeric(target.matrix[k, i] + decay.matrix[k, i-1] * exp(-1 * log(2)/decay.vals[[k,2]]))
+    if (dyrs >= 2) {
+      for (i in 2:dyrs) {
+        decay.matrix[k, i] <- as.numeric(
+          target.matrix[k, i] + decay.matrix[k, i - 1] * exp(-1 * log(2) / decay.vals[[k, 2]])
+        )
+      }
     }
   }
-  #  # Products in Use Discards (End Uses Totals -minus- Pruducts in Use array )
-  discard.matrix1 <- totals.matrix - decay.matrix  # The cumulative sums of carbon put into use ever minus the actual amount that remains after decay.
-  discard.matrix1.5[, 2:dyrs] <- discard.matrix1[, 1:(dyrs - 1)]  # Filling in with shifted discard.matrix1 values accounting for previous year carbon emitted
-  discard.matrix <- discard.matrix1 - discard.matrix1.5     # Annual emissions = for each year, the cumulative sum of in-use carbon  
-  #  #   minus the remaining carbon, minus the emitted values from the previous year.
-  #  # Output
-  totals.decay.output <- list(decay = decay.matrix, da = discard.matrix)
-} 
-
+  discard.matrix1 <- totals.matrix - decay.matrix
+  if (dyrs >= 2) discard.matrix1.5[, 2:dyrs] <- discard.matrix1[, 1:(dyrs - 1)]
+  discard.matrix <- discard.matrix1 - discard.matrix1.5
+  list(decay = decay.matrix, da = discard.matrix)
+}
+  
 
 # Sankey version of a function for creating columns of proportion values for wood and paper by discard type
 DiscardProd.s.fcn <- function(fate.type, disc.fates, dyrs) {
@@ -395,39 +400,52 @@ EmptyFirst.fcn <- function(target.array, n.eur, n.ownership){
 
 
 
-### This function conducts several summaries and calculations.  It creates a "decay array" from the target array that decays the target array
-## over time and accounts for annual inputs from the target array.  It creates a "totals array" that is the cumulative sum over years of  group
-##  every EU/owner.  The loop includes a 'next' call and starts the cumulative sums at the first non-zero entry to reduce computer time.  
-Decay.fcn <- function(empty.array, first.array, target.array, decay.matrix, N.EUR, N.OWNERSHIP, N.YEARS) {
-  decay.array <- totals.array <- discard.array1.5 <- array(0, c(N.EUR, N.OWNERSHIP, N.YEARS))    # Initiating with zeros
-  decay.array[, , 1] <- target.array[, , 1]   # The first year = initial values
-  for (k in 1:N.EUR) {  
-    for (j in 1:N.OWNERSHIP) {
-      # Skip if there's no data (empty or NA)
+### This function conducts several summaries and calculations.  
+### It builds a decay array from target.array and also derives annual discards.
+Decay.fcn <- function(empty.array, first.array, target.array, decay.matrix,
+                      N.EUR, N.OWNERSHIP, N.YEARS) {
+  
+  decay.array      <- array(0, c(N.EUR, N.OWNERSHIP, N.YEARS))
+  totals.array     <- array(0, c(N.EUR, N.OWNERSHIP, N.YEARS))
+  discard.array1.5 <- array(0, c(N.EUR, N.OWNERSHIP, N.YEARS))
+  
+  # Initialize first year if present
+  if (N.YEARS >= 1) {
+    decay.array[, , 1] <- target.array[, , 1]
+  }
+  
+  for (k in seq_len(N.EUR)) {
+    for (j in seq_len(N.OWNERSHIP)) {
+      
+      # Skip (eur,owner) cells with no data
       if (is.na(empty.array[k, j]) || empty.array[k, j] == 0) next
       
-      # Safely assign cumsum only if there are non-NA values
-      if (all(is.na(target.array[k, j, ]))) next
+      # Running totals of input (guard NA)
       totals.array[k, j, ] <- cumsum(replace(target.array[k, j, ],
                                              is.na(target.array[k, j, ]), 0))
-      # Ensure first index is valid
+      
+      # Start year for decay
       first.year <- first.array[k, j]
       if (is.na(first.year) || first.year < 2 || first.year > N.YEARS) next
       
       for (i in first.year:N.YEARS) {
-        decay.array[k, j, i] <- as.numeric(target.array[k, j, i] + decay.array[k, j, i - 1] * exp(-1 * log(2)/decay.matrix[[k,2]]))
+        decay.array[k, j, i] <- as.numeric(
+          target.array[k, j, i] +
+            decay.array[k, j, i - 1] * exp(-log(2) / decay.matrix[[k, 2]])
+        )
       }
     }
   }
-  # Products in Use Discards (End Uses Totals -minus- Pruducts in Use array )
-  discard.array1 <- totals.array - decay.array  # The cumulative sums of carbon put into use ever minus the actual amount that remains after decay.
-  discard.array1.5[, , 2:N.YEARS] <- discard.array1[, , 1:(N.YEARS - 1)]  # Filling in with shifted discard.array1 values accounting for previous year carbon emitted
-  discard.array <- discard.array1 - discard.array1.5     # Annual emissions = for each year, the cumulative sum of in-use carbon  
-  #   minus the remaining carbon, minus the emitted values from the previous year.
-  # Output
-  totals.decay.output <- list(decay = decay.array, da = discard.array)
-}  
-
+  
+  # Annual discards = (cumulative inputs - remaining stock) increment
+  discard.array1 <- totals.array - decay.array
+  if (N.YEARS >= 2) {
+    discard.array1.5[, , 2:N.YEARS] <- discard.array1[, , 1:(N.YEARS - 1)]
+  }
+  discard.array <- discard.array1 - discard.array1.5
+  
+  return(list(decay = decay.array, da = discard.array))
+}
 
 
 ## A function for creating columns of proportion values for wood and paper by discard type

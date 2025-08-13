@@ -1,17 +1,16 @@
+# Sankey_Code.r
+
 # --- Build reduced inputs for the Sankey horizon ---
 # --- Domestic harvest only (exclude Imports/Exports) for the Sankey mini-run ---
 yr_row <- which(harv.hwp$Year == hwp.yr)
 
 owner_cols <- setdiff(names(harv.hwp), c("Year", "Total", "Imports", "Exports"))
 if (length(owner_cols)) {
-  # Best source: sum the explicit ownership columns (State/Private/etc.)
   domestic_mbf <- sum(as.numeric(harv.hwp[yr_row, owner_cols, drop = FALSE]), na.rm = TRUE)
 } else {
-  # Fallback: if you only have Total (+ maybe Imports/Exports), subtract them
   total_mbf   <- as.numeric(harv.hwp[yr_row, "Total"])
   imports_mbf <- if ("Imports" %in% names(harv.hwp)) as.numeric(harv.hwp[yr_row, "Imports"]) else 0
   exports_mbf <- if ("Exports" %in% names(harv.hwp)) as.numeric(harv.hwp[yr_row, "Exports"]) else 0
-  # If Total includes I/E, this removes I/E; if it doesn't, the owner_cols branch above would have been used.
   domestic_mbf <- total_mbf - imports_mbf - exports_mbf
   domestic_mbf <- max(domestic_mbf, 0)
 }
@@ -22,19 +21,11 @@ harv.red.hwp <- data.frame(Year = (hwp.yr + (0:(d.yrs - 1))), tmp = 0)
 names(harv.red.hwp)[2] <- colname
 harv.red.hwp[1, colname] <- domestic_mbf
 
-# Optional: sanity print
-# message(sprintf("Sankey %d — Domestic harvest MBF = %.0f (excl. Imports/Exports)", hwp.yr, domestic_mbf))
-
 tpr.red.hwp <- tpr.hwp[, c(1, yr.index + 1)]
 ppr.red.hwp <- ppr.hwp[, c(1, yr.index + 1)]
-eur.red.hwp <- if ("data.table" %in% class(eur.hwp)) {
-  eur.hwp[, c(1, yr.index + 1), with = FALSE]
-} else {
-  eur.hwp[, c(1, yr.index + 1)]
-}
+eur.red.hwp <- if ("data.table" %in% class(eur.hwp)) eur.hwp[, c(1, yr.index + 1), with = FALSE] else eur.hwp[, c(1, yr.index + 1)]
 
 discard.fates.red.hwp <- if (length(hwp.yr:years[length(years)]) < d.yrs) {
-  # extend discard fates if horizon exceeds source years
   xtra.yrs <- d.yrs - length(hwp.yr:years[length(years)])
   extend.disc.fates <- data.frame(matrix(unlist(rep(discard.fates.hwp[, length(years) + 2], xtra.yrs)), ncol = xtra.yrs))
   names(extend.disc.fates) <- (hwp.yr + (d.yrs - xtra.yrs)):(hwp.yr + (d.yrs - 1))
@@ -69,18 +60,17 @@ hwp.sankey.output <- HwpModel.Sankey.fcn(
 # --- Year index for imports/exports from the FULL model ---
 yr_col <- match(hwp.yr, years)
 
-# Imports from full model
+# Imports (prefer vector, fallback from eu_array)
 imports_mmtc <- 0
 if (!is.null(model.outputs$import_carbon_mt) && !is.na(yr_col)) {
   imports_mmtc <- as.numeric(model.outputs$import_carbon_mt[yr_col])
 }
-if ((is.na(imports_mmtc) || imports_mmtc == 0) &&
-    "Imports" %in% dimnames(model.outputs$eu_array)[[2]]) {
+if ((is.na(imports_mmtc) || imports_mmtc == 0) && "Imports" %in% dimnames(model.outputs$eu_array)[[2]]) {
   imports_mmtc <- sum(model.outputs$eu_array[, "Imports", yr_col], na.rm = TRUE)
 }
 imports_mmtc[is.na(imports_mmtc)] <- 0
 
-# Exports from full model
+# Exports
 exports_mmtc <- 0
 if (!is.null(model.outputs$export_carbon_mt) && !is.na(yr_col)) {
   exports_mmtc <- as.numeric(model.outputs$export_carbon_mt[yr_col])
@@ -88,25 +78,24 @@ if (!is.null(model.outputs$export_carbon_mt) && !is.na(yr_col)) {
 exports_mmtc[is.na(exports_mmtc)] <- 0
 
 # --- Core flows from the minimized run (harvest-only this year) ---
-eur_mmtc        <- sum(hwp.sankey.output$eu_matrix[, 1])                  # total primary products this year (Harvest)
-eec_mmtc        <- sum(hwp.sankey.output$fuel_matrix[, 1])                # FUEL ONLY; DEC handled below
-eu.reduced_mmtc <- sum(hwp.sankey.output$eu.reduced_matrix[, 1])          # products in use after PIU loss
-dp.wood_mmtc    <- sum(hwp.sankey.output$dp_matrix[-hwp.sankey.output$eur.pulp, 1])  # wood loss
-dp.paper_mmtc   <- sum(hwp.sankey.output$dp_matrix[ hwp.sankey.output$eur.pulp, 1])  # pulp loss
+eur_mmtc        <- sum(hwp.sankey.output$eu_matrix[, 1])                  # primary (harvest) this year
+eec_mmtc        <- sum(hwp.sankey.output$fuel_matrix[, 1])                # fuel only; DEC added below
+eu.reduced_mmtc <- sum(hwp.sankey.output$eu.reduced_matrix[, 1])          # in use after PIU loss
+dp.wood_mmtc    <- sum(hwp.sankey.output$dp_matrix[-hwp.sankey.output$eur.pulp, 1])  # wood placement loss
+dp.paper_mmtc   <- sum(hwp.sankey.output$dp_matrix[ hwp.sankey.output$eur.pulp,  1]) # pulp placement loss
 
-# Discards from PIU over the decay horizon
-pu.discard_mmtc <- sum(hwp.sankey.output$pu.discard_matrix[, 2:d.yrs])
+pu.discard_mmtc <- if (d.yrs >= 2) sum(hwp.sankey.output$pu.discard_matrix[, 2:d.yrs]) else 0
 
-# Balance PIU to evacuate Primary Products quickly
-pu_remaining_mmtc <- max(0, eu.reduced_mmtc - pu.discard_mmtc)
+# Remaining PIU stock at end of horizon (correct: take the modeled stock at t = d.yrs)
+pu_remaining_mmtc <- sum(hwp.sankey.output$pu_matrix[, d.yrs])
 
-# Immediate discard fates (DP + PIU discard are already inside these matrices)
+# Immediate discard fates (already include PIU discards)
 landfill.input_mmtc <- sum(hwp.sankey.output$landfill.input_matrix[, 1:d.yrs])
 dumps.input_mmtc    <- sum(hwp.sankey.output$dumps.input_matrix[,    1:d.yrs])
 compost.input_mmtc  <- sum(hwp.sankey.output$compost.input_matrix[,  1:d.yrs])
-bwoec.input_mmtc    <- sum(hwp.sankey.output$bwoec.input_matrix[,    1:d.yrs])  # burned without EC
+bwoec.input_mmtc    <- sum(hwp.sankey.output$bwoec.input_matrix[,    1:d.yrs])  # burned w/o EC
 recov.input_mmtc    <- sum(hwp.sankey.output$recov.input_matrix[,    1:d.yrs])
-dec.input_mmtc      <- sum(hwp.sankey.output$dec.input_matrix[,      1:d.yrs])  # Discard Energy Capture (to EEC)
+dec.input_mmtc      <- sum(hwp.sankey.output$dec.input_matrix[,      1:d.yrs])  # with EC
 
 # SWDS emissions over horizon + non-decaying LF stock
 dumps.discard_mmtc     <- sum(hwp.sankey.output$dumps.discard_matrix[,     1:d.yrs])
@@ -117,36 +106,29 @@ lf.available_mmtc   <- sum(hwp.sankey.output$landfill_matrix[, d.yrs])     # LF 
 dumps_mmtc          <- sum(hwp.sankey.output$dumps_matrix[,     d.yrs])    # dumps stock at end
 swds_mmtc           <- lf.fixed_mmtc + lf.available_mmtc + dumps_mmtc
 
-# Recovered pool
-recov_mmtc          <- sum(hwp.sankey.output$recov_matrix[, d.yrs])        # stock of recovered in-use at end
+# Recovered pool (stock at end + its future discards counted above)
+recov_mmtc          <- sum(hwp.sankey.output$recov_matrix[, d.yrs])
 recov.discard_mmtc  <- sum(hwp.sankey.output$recov.discard_matrix[, 1:d.yrs])
 
 # --- Mass-balance scaling at the Primary node ---
-# Keep Exports fixed; scale only the non-export outflows from Primary.
+# k = (Harvest + Imports − Exports) / Harvest
+scale_factor <- if (eur_mmtc > 0) (eur_mmtc + imports_mmtc - exports_mmtc) / eur_mmtc else 1
+scale_factor <- max(scale_factor, 0)  # avoid negative
 
-# Sanity: before scaling, the non-export outflows from Primary should equal eur_mmtc
-# (Fuel + PIU + placement losses) == eur_mmtc
-# If this ever fails, something upstream is inconsistent.
-# stopifnot(abs((eec_mmtc + eu.reduced_mmtc + dp.wood_mmtc + dp.paper_mmtc) - eur_mmtc) < 1e-6)
+primary_target     <- eur_mmtc + imports_mmtc
+primary_out_scaled <- eec_mmtc + eu.reduced_mmtc + dp.wood_mmtc + dp.paper_mmtc + exports_mmtc
+message(sprintf("[Sankey %d] Primary net (should be ~0): %.6f", hwp.yr, primary_target - primary_out_scaled))
 
-# Correct scale factor:
-#   Harvest + Imports  =  (Fuel + PIU + placement_losses)*k  +  Exports
-# ⇒ k = (Harvest + Imports − Exports) / Harvest
-scale_factor <- if (eur_mmtc > 0) {
-  (eur_mmtc + imports_mmtc - exports_mmtc) / eur_mmtc
-} else 1
+message(sprintf("[Sankey %d] InUse stock (PU) @end=%.3f, Recovered stock @end=%.3f, Discard->DEC=%.3f",
+                hwp.yr, pu_remaining_mmtc, recov_mmtc, dec.input_mmtc))
 
-# Guard against weird negatives if Exports > Harvest + Imports
-scale_factor <- max(scale_factor, 0)
-
-# Apply to non-export outflows from Primary
 eec_mmtc        <- eec_mmtc        * scale_factor
 eu.reduced_mmtc <- eu.reduced_mmtc * scale_factor
 dp.wood_mmtc    <- dp.wood_mmtc    * scale_factor
 dp.paper_mmtc   <- dp.paper_mmtc   * scale_factor
 
-# Scale downstream flows to preserve continuity (they originate from the scaled amounts above)
 pu.discard_mmtc     <- pu.discard_mmtc     * scale_factor
+pu_remaining_mmtc   <- pu_remaining_mmtc   * scale_factor
 
 landfill.input_mmtc <- landfill.input_mmtc * scale_factor
 dumps.input_mmtc    <- dumps.input_mmtc    * scale_factor
@@ -165,18 +147,19 @@ dumps_mmtc          <- dumps_mmtc          * scale_factor
 swds_mmtc           <- swds_mmtc           * scale_factor
 recov_mmtc          <- recov_mmtc          * scale_factor
 
-# Optional check: should be ~0 (floating-point noise aside)
+# Sanity (≈ 0 with FP noise)
 primary_target     <- eur_mmtc + imports_mmtc
 primary_out_scaled <- eec_mmtc + eu.reduced_mmtc + dp.wood_mmtc + dp.paper_mmtc + exports_mmtc
 message(sprintf("Primary net (should be ~0): %.6f", primary_target - primary_out_scaled))
 
-# --- Define 17 Sankey nodes in order ---
+# --- Define Sankey nodes (includes an explicit stock node) ---
 nodes <- data.frame(name = c(
-  "Harvest",                    
+  "Harvest",
   "Imports",
   "Primary Products",
   "Emitted with Energy Capture",
   "Products in Use",
+  "In-Use Stock (End of Horizon)",      # <-- added explicit stock node
   "Loss When Wood Placed Into End Uses",
   "Loss When Pulp Placed Into End Uses",
   "Discard",
@@ -189,41 +172,45 @@ nodes <- data.frame(name = c(
   "Emitted without Energy Capture",
   "Discard Energy Capture",
   "Exports"
-))
+), stringsAsFactors = FALSE)
 
 idx <- setNames(seq_len(nrow(nodes)), nodes$name)
 n_nodes <- nrow(nodes)
 mat.mmtc <- matrix(0, nrow = n_nodes, ncol = n_nodes)
 rownames(mat.mmtc) <- colnames(mat.mmtc) <- nodes$name
 
-# Inflows to Primary: Harvest and Imports
+# Inflows to Primary
 mat.mmtc[idx["Harvest"],  idx["Primary Products"]] <- eur_mmtc
 mat.mmtc[idx["Imports"],  idx["Primary Products"]] <- imports_mmtc
 
-# Primary → downstream (keep your values as before)
-mat.mmtc[idx["Primary Products"], idx["Emitted with Energy Capture"]]         <- eec_mmtc
-mat.mmtc[idx["Primary Products"], idx["Products in Use"]]                     <- eu.reduced_mmtc
-mat.mmtc[idx["Primary Products"], idx["Loss When Wood Placed Into End Uses"]] <- dp.wood_mmtc
-mat.mmtc[idx["Primary Products"], idx["Loss When Pulp Placed Into End Uses"]] <- dp.paper_mmtc
-mat.mmtc[idx["Primary Products"], idx["Exports"]]                             <- exports_mmtc
+# Primary → downstream
+mat.mmtc[idx["Primary Products"], idx["Emitted with Energy Capture"]]           <- eec_mmtc
+mat.mmtc[idx["Primary Products"], idx["Products in Use"]]                       <- eu.reduced_mmtc
+mat.mmtc[idx["Primary Products"], idx["Loss When Wood Placed Into End Uses"]]   <- dp.wood_mmtc
+mat.mmtc[idx["Primary Products"], idx["Loss When Pulp Placed Into End Uses"]]   <- dp.paper_mmtc
+mat.mmtc[idx["Primary Products"], idx["Exports"]]                               <- exports_mmtc
 
-# "Products in Use (Remaining)"
-mat.mmtc[idx["Products in Use"], idx["Products in Use (Remaining)"]] <- pu_remaining_mmtc 
-mat.mmtc[idx["Recovered"], idx["Products in Use (Remaining)"]]    <- recov_mmtc
+# PIU stock and discards
+mat.mmtc[idx["Products in Use"], idx["In-Use Stock (End of Horizon)"]] <- pu_remaining_mmtc
+mat.mmtc[idx["Products in Use"], idx["Discard"]]                       <- pu.discard_mmtc
 
-# PIU / placement losses → Discard
-mat.mmtc[idx["Products in Use"],                      idx["Discard"]] <- pu.discard_mmtc
+# Placement losses → Discard
 mat.mmtc[idx["Loss When Wood Placed Into End Uses"],  idx["Discard"]] <- dp.wood_mmtc
 mat.mmtc[idx["Loss When Pulp Placed Into End Uses"],  idx["Discard"]] <- dp.paper_mmtc
 
 # Discard → immediate fates
 mat.mmtc[idx["Discard"], idx["Dumps"]]                 <- dumps.input_mmtc
 mat.mmtc[idx["Discard"], idx["Landfill, Permanent"]]   <- lf.fixed_mmtc
-mat.mmtc[idx["Discard"], idx["Landfill, Decomposing"]] <- (landfill.input_mmtc - lf.fixed_mmtc)
+# guard against tiny negatives from rounding
+lf_decomp_flow <- max(0, landfill.input_mmtc - lf.fixed_mmtc)
+mat.mmtc[idx["Discard"], idx["Landfill, Decomposing"]] <- lf_decomp_flow
 mat.mmtc[idx["Discard"], idx["Compost"]]               <- compost.input_mmtc
 mat.mmtc[idx["Discard"], idx["Burned"]]                <- bwoec.input_mmtc
 mat.mmtc[idx["Discard"], idx["Recovered"]]             <- recov.input_mmtc
 mat.mmtc[idx["Discard"], idx["Discard Energy Capture"]] <- dec.input_mmtc
+
+# Recovered → stock (recovered material remaining at end)
+mat.mmtc[idx["Recovered"], idx["In-Use Stock (End of Horizon)"]] <- recov_mmtc
 
 # Disposal → emissions
 mat.mmtc[idx["Dumps"],                 idx["Emitted without Energy Capture"]] <- dumps.discard_mmtc
@@ -233,19 +220,14 @@ mat.mmtc[idx["Burned"],                idx["Emitted without Energy Capture"]] <-
 mat.mmtc[idx["Recovered"],             idx["Emitted without Energy Capture"]] <- recov.discard_mmtc
 mat.mmtc[idx["Discard Energy Capture"],idx["Emitted with Energy Capture"]]    <- dec.input_mmtc
 
-# ---- Name, prune, and build links once ----
-rownames(mat.mmtc) <- nodes$name
-colnames(mat.mmtc) <- nodes$name
+# ---- Hide specific nodes (optional) ----
+drop_names <- c("In-Use Stock (End of Horizon)")
 
-# Long form from the full matrix
-links_long <- as.data.frame(mat.mmtc) |>
-  tibble::rownames_to_column("source") |>
-  tidyr::pivot_longer(-source, names_to = "target", values_to = "value") |>
-  dplyr::filter(value > 0)
+# Drop nodes with zero flow AND any explicitly hidden ones
+used <- ((rowSums(mat.mmtc) > 0) | (colSums(mat.mmtc) > 0)) &
+  !(rownames(mat.mmtc) %in% drop_names)
 
-# Drop nodes with zero total in+out
-used <- (rowSums(mat.mmtc) > 0) | (colSums(mat.mmtc) > 0)
-nodes2 <- nodes[used, , drop = FALSE]
+nodes2  <- nodes[used, , drop = FALSE]
 mat.mmtc <- mat.mmtc[nodes2$name, nodes2$name, drop = FALSE]
 
 # Build links
@@ -255,8 +237,8 @@ links <- mat.mmtc |>
   tidyr::pivot_longer(-source, names_to = "target", values_to = "value") |>
   dplyr::filter(value > 0) |>
   dplyr::mutate(
-    IDsource = match(source, nodes2$name) - 1,
-    IDtarget = match(target, nodes2$name) - 1
+    IDsource = match(source, nodes2$name) - 1L,
+    IDtarget = match(target, nodes2$name) - 1L
   )
 
 # Quick checks you can print once
@@ -271,7 +253,6 @@ links <- mat.mmtc |>
 # print(dim(mat.mmtc)); print(head(links))
 #subset(links, source=="Imports" & target=="Primary Products")
 #subset(links, source=="Primary Products" & target=="Exports")
-
 
 
 
