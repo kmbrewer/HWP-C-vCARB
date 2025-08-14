@@ -337,7 +337,15 @@ sum(model.outputs$eu_array[, which(ownership.names == "Exports"), ])
 sum(model.outputs$eu_array[, which(ownership.names == "Imports"), ])
 
 
+# Additional QC checks
 
+# Which product ID's are paper?
+paper_rows <- grepl("pulp", ratio_cat.hwp$EndUseProduct, ignore.case = TRUE)
+ratio_cat.hwp[paper_rows, c("EndUseID", "EndUseProduct", "PrimaryProductID", "TimberProductID")]
+paper_ids <- ratio_cat.hwp$EndUseID[paper_rows]
+
+# EUR time series used for paper:
+subset(eur.hwp, EndUseID %in% paper_ids)
 
 
 
