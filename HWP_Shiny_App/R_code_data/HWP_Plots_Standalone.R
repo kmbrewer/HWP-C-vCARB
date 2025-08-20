@@ -5,6 +5,7 @@ library(dplyr)
 library(tidyr)
 library(viridisLite)
 library(abind)
+library(reshape2)
 
 
 # ---- Build hwp from model.outputs -------------------------------------------
@@ -129,7 +130,7 @@ hwp <- make_hwp(model.outputs)
 
 
 # =========================================================
-# 1) Annual Timber Harvest  (AnnTimHarv)
+# 1) Annual Harvest and Trade (AnnHarvestandTrade)
 #    metric: "MMTC" | "CO2e" | "BBF"
 #    summary: "annual" | "cumulative"
 #    mode: "ownership_total" (stack owners + total line),
@@ -312,108 +313,176 @@ plot_ann_timber_harvest <- function(hwp,
   }
 }
 
+
 # Example call
 p1 <- plot_ann_timber_harvest(hwp,
                               metric="MMTC", summary="annual", mode="ownership_total",
                               ownership_start_year=1952, trade_start_year=2001)
-print(p1); save_plot_png(p1, "Plot_AnnTimHarv.png")
+print(p1); save_plot_png(p1, "Plot_AnnHarvestandTrade.png")
 
 
 
 # =========================================================
 # 2) Annual Net Change in Carbon Storage (Production/Simple Decay)
-#    approach: "production" or "simple_decay"
-#    metrictype: "TgC" | "CO2e"
+#    approach:   "production" or "simple_decay"
+#    metrictype: "MMTC" | "CO2e"
+#    Notes:
+#      • Production approach = show stock changes (PU + SWDS) only.
+#      • Simple-decay approach = stack annual inflow (consumption) vs. emissions.
+#        Consumption inflow = Domestic harvest (+ Imports − Exports) from eu_array.
+#      • Imports are positive; Exports are negative in the stack (drawn below zero).
 # =========================================================
-plot_annual_net_change <- function(hwp,
-                                   approach = c("production","simple_decay"),
-                                   metrictype = c("TgC","CO2e"),
-                                   include_net_line = TRUE) {
-  approach <- match.arg(approach)
+
+plot_annual_net_change <- function(
+    hwp,
+    approach   = c("production","simple_decay"),
+    metrictype = c("MMTC","CO2e"),
+    include_net_line = TRUE
+) {
+  approach   <- match.arg(approach)
   metrictype <- match.arg(metrictype)
   
-  years <- .get_years(hwp)
+  # Fallback axis helper (ASCII only)
+  if (!exists(".axis_pretty", mode = "function")) {
+    .axis_pretty <- function(x, positive_only = FALSE, n = 6) {
+      x <- x[is.finite(x)]
+      if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
+      rng <- range(x, na.rm = TRUE)
+      if (positive_only) rng[1] <- min(0, rng[1])
+      br <- pretty(rng, n = n)
+      list(min = min(br), max = max(br), by = diff(br)[1])
+    }
+  }
+  
+  years    <- .get_years(hwp)
   id_total <- .idx_total(hwp)
   
-  # totals (Tg C)
-  pu <- apply(hwp$pu.final_array[, id_total, ], 2, sum)/1e6
-  sw <- apply(hwp$swdsCtotal_array[, id_total, ], 2, sum)/1e6
-  eec <- apply(hwp$eec_array[, id_total, ], 2, sum)/1e6    # annual
-  ewo <- apply(hwp$ewoec_array[, id_total, ], 2, sum)/1e6  # annual
+  # Sum across owner & class to one value per YEAR
+  psum_dim2 <- function(arr) apply(arr[, id_total, , drop = FALSE], 3, sum, na.rm = TRUE)
   
-  # annual changes (lag diff of cumulative pools)
-  pu_ch   <- diff(pu)
-  sw_ch   <- diff(sw)
-  eec_ch  <- eec[-1]             # align to year t (your original code negates for stacked display)
-  ewoec_ch<- ewo[-1]
+  # Totals (Tg C -> MMT C)
+  pu  <- psum_dim2(hwp$pu.final_array)   / 1e6  # cumulative
+  sw  <- psum_dim2(hwp$swdsCtotal_array) / 1e6  # cumulative
+  eec <- psum_dim2(hwp$eec_array)        / 1e6  # annual
+  ewo <- psum_dim2(hwp$ewoec_array)      / 1e6  # annual
+  
+  # Annual changes aligned to year t
+  pu_ch    <- diff(pu)
+  sw_ch    <- diff(sw)
+  eec_ch   <- eec[-1]
+  ewoec_ch <- ewo[-1]
   
   df <- data.frame(
-    Year = years[-1],
-    SWDSchange = sw_ch,
-    PUchange   = pu_ch,
-    EECchange  = -eec_ch,      # negative for plotting (emission downward)
-    EWOECchange= -ewoec_ch     # negative for plotting
+    Year        = years[-1],
+    SWDSchange  = sw_ch,
+    PUchange    = pu_ch,
+    EECchange   = -eec_ch,     # plot emissions downward
+    EWOECchange = -ewoec_ch,
+    stringsAsFactors = FALSE
   )
-  df$Net <- df$SWDSchange + df$PUchange
   
-  # Harvest = sum of all annual flows (as in your Table 5 logic)
-  df$Harvest <- df$PUchange + df$SWDSchange - df$EECchange - df$EWOECchange
+  # Net stock change; and consumption inflow (Domestic + Imports - Exports)
+  df$Net    <- df$SWDSchange + df$PUchange
+  df$Inflow <- df$PUchange + df$SWDSchange - df$EECchange - df$EWOECchange
   
-  # metric conversion
+  # Metric & labels
   if (metrictype == "CO2e") {
-    df[,-1] <- df[,-1] * (44/12)
+    df[, setdiff(names(df), "Year")] <- df[, setdiff(names(df), "Year")] * (44/12)
+    ylab <- "MMT CO2e"
+  } else {
+    ylab <- "MMT C"
   }
-  ylab <- .lab_co2e(if (metrictype=="CO2e") "CO2e" else "TgC")
   
   if (approach == "production") {
-    # show SWDSchange + PUchange stacked; optional Net line
-    long <- df |>
-      select(Year, SWDSchange, PUchange, Net) |>
-      pivot_longer(-Year, names_to = "series", values_to = "val")
-    bar <- long |> filter(series %in% c("SWDSchange","PUchange"))
-    ax <- .axis_pretty(c(bar$val, if (include_net_line) long$val[long$series=="Net"]), positive_only = FALSE)
+    # Single stacked layer; PIU bottom, SWDS top via factor order
+    bar <- rbind(
+      data.frame(Year = df$Year, series = "PUchange",   val = df$PUchange,   stringsAsFactors = FALSE),
+      data.frame(Year = df$Year, series = "SWDSchange", val = df$SWDSchange, stringsAsFactors = FALSE)
+    )
+    bar$series <- factor(bar$series, levels = c("PUchange","SWDSchange"))
+    
+    ax <- .axis_pretty(c(bar$val, if (isTRUE(include_net_line)) df$Net), positive_only = FALSE)
     
     p <- ggplot(bar, aes(Year, val, fill = series)) +
-      geom_col() + geom_hline(yintercept = 0) +
-      scale_fill_manual(values = c(SWDSchange="#B42E8D", PUchange="#7801A8"), name = NULL,
-                        labels = c("Solid Waste Disposal Sites","Products in Use")) +
-      scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by), limits = c(ax$min, ax$max), expand = c(0,0)) +
-      labs(x=NULL, y=ylab, title="IPCC production approach — stock change") +
+      geom_col() +
+      geom_hline(yintercept = 0, color = "black", linewidth = 0.6) +
+      scale_fill_manual(
+        values = c(SWDSchange = "#B42E8D", PUchange = "#7801A8"),
+        breaks = c("SWDSchange","PUchange"),
+        labels = c("Solid Waste Disposal Sites", "Products in Use"),
+        name   = NULL
+      ) +
+      scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
+                         limits = c(ax$min, ax$max), expand = c(0, 0)) +
+      labs(x = "Year", y = ylab,
+           title = "B) Annual Net Change in Carbon Storage -- Production Approach") +
       theme_bw(base_size = 14)
-    if (include_net_line) {
-      p <- p + geom_line(data = df, aes(Year, Net, color="Net"), linewidth=1.2) +
-        scale_color_manual(values=c(Net="#3CB371"), name=NULL)
-    }
-    return(p)
-  } else {
-    # simple decay: stack Harvest (positive), EWOECchange (neg), EECchange (neg); optional Net line
-    bar <- df |>
-      select(Year, Harvest, EWOECchange, EECchange, Net) |>
-      pivot_longer(-Year, names_to="series", values_to="val") |>
-      filter(series %in% c("Harvest","EWOECchange","EECchange"))
-    ax <- .axis_pretty(c(bar$val, if (include_net_line) df$Net), positive_only = FALSE)
     
-    p <- ggplot(bar, aes(Year, val, fill=series)) +
-      geom_col() + geom_hline(yintercept=0) +
-      scale_fill_manual(values=c(EWOECchange="#F99A3E", EECchange="#F8DF25", Harvest="#00CED1"),
-                        name=NULL,
-                        labels=c("Emitted without Energy Capture",
-                                 "Emitted with Energy Capture",
-                                 "Annual Harvest")) +
-      scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by), limits = c(ax$min, ax$max), expand = c(0,0)) +
-      labs(x=NULL, y=ylab, title="IPCC simple decay approach — net change") +
-      theme_bw(base_size = 14)
-    if (include_net_line) {
-      p <- p + geom_line(data = df, aes(Year, Net, color="Net"), linewidth=1.2) +
-        scale_color_manual(values=c(Net="#3CB371"), name=NULL)
+    if (isTRUE(include_net_line)) {
+      p <- p +
+        geom_line(data = df, aes(Year, Net, color = "Net"),
+                  linewidth = 1.1, inherit.aes = FALSE) +
+        scale_color_manual(values = c(Net = "#3CB371"), name = NULL)
     }
     return(p)
   }
+  
+  # Simple-decay branch
+  bar <- rbind(
+    data.frame(Year = df$Year, series = "Inflow",        val = df$Inflow,        stringsAsFactors = FALSE),
+    data.frame(Year = df$Year, series = "EWOECchange",   val = df$EWOECchange,   stringsAsFactors = FALSE),
+    data.frame(Year = df$Year, series = "EECchange",     val = df$EECchange,     stringsAsFactors = FALSE)
+  )
+  # bottom -> top stacking order
+  bar$series <- factor(bar$series, levels = c("Inflow","EECchange","EWOECchange"))
+  
+  ax <- .axis_pretty(c(bar$val, if (isTRUE(include_net_line)) df$Net), positive_only = FALSE)
+  
+  p <- ggplot(bar, aes(Year, val, fill = series)) +
+    geom_col() +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.6) +
+    scale_fill_manual(
+      values = c(Inflow = "#00CED1", EWOECchange = "#F99A3E", EECchange = "#F8DF25"),
+      breaks = c("Inflow","EECchange","EWOECchange"),
+      labels = c("Consumption inflow (Domestic + Imports - Exports)",
+                 "Emitted with Energy Capture",
+                 "Emitted without Energy Capture"),
+      name = NULL
+    ) +
+    scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
+                       limits = c(ax$min, ax$max), expand = c(0, 0)) +
+    labs(x = "Year", y = ylab,
+         title = "B) Annual Net Change in Carbon Storage -- Simple-decay Approach (alternative)") +
+    theme_bw(base_size = 14)
+  
+  if (isTRUE(include_net_line)) {
+    p <- p +
+      geom_line(data = df, aes(Year, Net, color = "Net"),
+                linewidth = 1.1, inherit.aes = FALSE) +
+      scale_color_manual(values = c(Net = "#3CB371"), name = NULL)
+  }
+  return(p)
 }
 
-# 2) Annual Net Change (Production approach) with Net line
-p2 <- plot_annual_net_change(hwp, approach="production", metrictype="TgC", include_net_line=TRUE)
+
+# ---- Example: Production approach with Net line ----
+p2 <- plot_annual_net_change(
+  hwp,
+  approach       = "production",
+  metrictype     = "MMTC",
+  include_net_line = TRUE
+)
 print(p2); save_plot_png(p2, "Plot_AnNetChCStor_Production.png")
+
+# ---- Example: Simple Decay approach with Net line ----
+p2 <- plot_annual_net_change(
+  hwp,
+  approach       = "simple_decay",
+  metrictype     = "MMTC",
+  include_net_line = TRUE
+)
+print(p2); save_plot_png(p2, "Plot_AnNetChCStor_SimpleDecay.png")
+
 
 
 # =========================================================

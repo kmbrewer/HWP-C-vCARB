@@ -1,3 +1,5 @@
+# PlotFunction1.r
+
 # Container for functions to be used in the HWP Shiny app
 
 # Function for download buttons
@@ -142,7 +144,7 @@ decay.fcn.s <- function(target.matrix, decay.vals, n.eur, dyrs) {
   discard.matrix <- discard.matrix1 - discard.matrix1.5
   list(decay = decay.matrix, da = discard.matrix)
 }
-  
+
 
 # Sankey version of a function for creating columns of proportion values for wood and paper by discard type
 DiscardProd.s.fcn <- function(fate.type, disc.fates, dyrs) {
@@ -467,5 +469,4 @@ DiscardProd.fcn <- function(fate.type, disc.fates, N.YEARS) {
     mutate(Year = as.numeric(Year),
            paper = ifelse(DiscardType == "paper", 1, 0))
 }
-
 

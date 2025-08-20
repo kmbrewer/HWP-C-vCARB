@@ -23,7 +23,7 @@
 
 renv::restore()   # Begin here to download appropriate package versions
 
-install.packages("usethis")
+install.packages("reshape2")
 install.packages("C:/Users/kbrewer/Downloads/chattr_0.3.0.tar.zip", repos = NULL, type = "win.binary")
 
 
