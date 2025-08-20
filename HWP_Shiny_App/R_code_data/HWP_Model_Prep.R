@@ -1,3 +1,5 @@
+# HWP_Model_Prep.R
+
 hwp.model.options <- hwp.data$HWP_MODEL_OPTIONS
 harv.hwp <- hwp.data$Harvest_MBF   # harvest data, units = 1000 board feet. Used to obtain number of years (N.YEARS) and ownership names
 bfcf.hwp <- hwp.data$BFCF  # Board feet to cubic feet

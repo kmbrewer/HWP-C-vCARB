@@ -1,3 +1,5 @@
+# HWP_Output_Prep.R
+
 ###### This script operates a bit like a function.  The purpose is to provide 
 #####   model output values that may be used for generating Shiny plots, 
 ###     downloading tables, or providing to the Monte Carlo.  
@@ -38,6 +40,16 @@ ownership.names <- dimnames(eu_array)[[2]]
 years_dim <- as.numeric(dimnames(eu_array)[[3]])
 n_years <- length(years_dim)
 
+# --- Shape guardrails --------------------------------------------------------
+if(is.null(ownership.names) || is.null(years_dim)) {
+  stop("eu_array is missing dimnames for ownerships/years.", call. = FALSE)
+}
+
+# eu_total should match n_years
+eu_total <- apply(eu_array, 3, sum)
+assert_len <- function(x, n, nm){ if(length(x)!=n) stop(sprintf("%s length %d != %d years", nm, length(x), n), call. = FALSE) }
+assert_len(eu_total, n_years, "eu_total")
+
 # Safe getter: if the model didn’t return the vectors, use zeros of the right length
 get_or_zero <- function(x, n) {
   if (!is.null(x) && length(x) == n) as.numeric(x) else rep(0, n)
@@ -62,10 +74,18 @@ if (all(import_carbon_mt == 0) && "Imports" %in% ownership.names) {
 # Build a denominator that avoids double-counting exports:
 # total EUR = (everything in eu_array) - (exports already in eu_array, if any) + (authoritative exports vector)
 eu_total <- apply(eu_array, 3, sum)
+
 exports_in_eu <- if ("Exports" %in% ownership.names)
   apply(eu_array[, ownership.names == "Exports", , drop = FALSE], 3, sum) else rep(0, n_years)
 
+# total EUR = everything currently in eu_array (which may still include an Exports slice from legacy data),
+# minus any Exports already in eu_array, plus the authoritative export_carbon_mt vector.
 total_carbon_by_year <- eu_total - exports_in_eu + export_carbon_mt
+
+# after computing export_carbon_mt/import_carbon_mt and total_carbon_by_year
+stopifnot(length(export_carbon_mt) == n_years, length(import_carbon_mt) == n_years)
+attr(export_carbon_mt, "locked") <- TRUE
+attr(import_carbon_mt, "locked") <- TRUE
 
 # -------- Tables --------
 # T6.0 – Annual Exports (MTC)

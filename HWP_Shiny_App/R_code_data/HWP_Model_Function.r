@@ -1,4 +1,4 @@
-
+# HWP_Model_Function.r
 
 ########################################################
 ###            Model Functions 
@@ -17,6 +17,28 @@
 #Decay.fcn:  See PlotFunctions.1
 
 
+# --- Helpers: safe join + NA guard ------------------------------------------
+safe_stop <- function(...){ stop(sprintf(...), call. = FALSE) }
+
+require_cols <- function(df, cols, name){
+  miss <- setdiff(cols, names(df))
+  if(length(miss)) safe_stop("[%s] is missing columns: %s", name, paste(miss, collapse=", "))
+}
+
+assert_no_na <- function(df, cols, where){
+  bad <- df %>% mutate(.row = row_number()) %>% filter(if_any(all_of(cols), is.na))
+  if(nrow(bad)){
+    glimpse <- bad %>% select(.row, any_of(c("Year","EndUseID","PrimaryProductID","TimberProductID")), all_of(cols)) %>% head(10)
+    print(glimpse)
+    safe_stop("NA detected in %s for columns: %s. See printed rows above.", where, paste(cols, collapse=", "))
+  }
+}
+
+assert_length <- function(x, n, label){
+  if(length(x) != n) safe_stop("Length mismatch for %s: got %d, expected %d.", label, length(x), n)
+}
+
+
 
 ########################################################
 ## Model Code
@@ -24,6 +46,15 @@
 
 HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, eu_half.lives, discard.fates, discard.hl, 
                          ownership.names, N.EUR, N.OWNERSHIP, N.YEARS, PIU.WOOD.LOSS, PIU.PAPER.LOSS) {
+  
+  # --- Input shape checks ------------------------------------------------------
+  require_cols(harv, c("Year"), "harv")
+  require_cols(bfcf, c("EndYear","Conversion"), "bfcf")
+  require_cols(tpr,  c("TimberProductID"), "tpr")
+  require_cols(ppr,  c("PrimaryProductID"), "ppr")
+  require_cols(ratio_cat, c("EndUseID","PrimaryProductID","TimberProductID","EndUseProduct"), "ratio_cat")
+  require_cols(ccf_conversion, c("PrimaryProductID","CCFtoMTconv"), "ccf_conversion")
+  require_cols(eur, c("EndUseID"), "eur")
   
   # Constructing data to place in the End Use Products array
   harv[is.na(harv) == T] <- 0        # Replace NAs with zeros
@@ -82,6 +113,14 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
         distinct()
     )
   }
+  
+  # Must-have columns
+  require_cols(eu_ratios, c("Year","EndUseID","PrimaryProductID","TimberProductID",
+                            "EU_Values","ProdRatio","PP_Values","CCFtoMTconv","Vol_cf","MTC"), "eu_ratios")
+  
+  # No NAs in the multipliers or result
+  assert_no_na(eu_ratios, c("EU_Values","ProdRatio","PP_Values","CCFtoMTconv","Vol_cf","MTC"), "eu_ratios (join/mapping)")
+  
    
   # eu_array is the total annual C into each of the use/ownership categories
   eu_array <- array(eu_ratios$MTC, c(N.EUR, N.OWNERSHIP, N.YEARS))      # creating the array (worksheet: CheckEUC)
@@ -94,6 +133,12 @@ HwpModel.fcn <- function(harv, bfcf, tpr, ppr, ratio_cat, ccf_conversion, eur, e
     ownership.names,
     as.character(min(harv_cf$Year):max(harv_cf$Year))
   )
+  
+  expected_len <- N.EUR * N.OWNERSHIP * N.YEARS
+  if(length(eu_ratios$MTC) != expected_len){
+    safe_stop("eu_ratios length (%d) != N.EUR*N.OWNERSHIP*N.YEARS (%d). Check join cardinalities.", 
+              length(eu_ratios$MTC), expected_len)
+  }
   
   # Indices
   import_idx <- if ("Imports" %in% ownership.names) which(ownership.names == "Imports") else integer(0)
