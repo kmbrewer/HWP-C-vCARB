@@ -128,6 +128,177 @@ hwp <- make_hwp(model.outputs)
 .lab_co2e <- function(metrictype) if (metrictype=="CO2e") expression("Tg C"*O[2]*e) else "Tg C"
 
 
+# =========================================================
+# Annual timber harvest by PRODUCT CATEGORY (EndUseID bins)
+#   metric:  "MMTC" | "CO2e" | "BBF"
+#   summary: "annual" | "cumulative"
+#   mode:    "category_total" | "category" | "total"
+# =========================================================
+# =========================================================
+# Annual timber harvest by PRODUCT CATEGORY (EndUseID bins)
+#   metric:  "MMTC" | "CO2e" | "BBF"   (arrays assumed in MMT C)
+#   summary: "annual" | "cumulative"
+#   mode:    "category_total" | "category" | "total"
+# =========================================================
+
+plot_ann_timber_by_enduse_bins <- function(
+    hwp,
+    metric  = c("MMTC","CO2e","BBF"),
+    summary = c("annual","cumulative"),
+    mode    = c("category_total","category","total")
+) {
+  metric  <- match.arg(metric)
+  summary <- match.arg(summary)
+  mode    <- match.arg(mode)
+  
+  # ---- helpers ----
+  years <- .get_years(hwp)
+  if (!exists(".axis_pretty", mode = "function")) {
+    .axis_pretty <- function(x, positive_only = FALSE, n = 6) {
+      x <- x[is.finite(x)]
+      if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
+      rng <- range(x, na.rm = TRUE)
+      if (positive_only) rng[1] <- min(0, rng[1])
+      br <- pretty(rng, n = n)
+      list(min = min(br), max = max(br), by = diff(br)[1])
+    }
+  }
+  
+  # ---- EndUseID -> category bins (priority order = first wins) ----
+  bin_defs <- list(
+    "Fuel" = c(1, 48, 95, 142, 197),
+    "Furniture" = c(5, 20, 28, 42, 52, 68, 81, 84, 99, 116, 121, 139, 144, 155, 165, 186),
+    "Housing and Construction" = c(
+      10,21,27,36,57,65,73,91,104,115,125,132,145,164,170,183,
+      12,14,24,37,56,69,78,86,100,108,128,134,146,162,169,184,
+      11,15,26,46,58,62,79,85,102,114,133,152,154,168,185,
+      8,17,29,39,54,70,75,90,103,111,123,138,147,158,175,181,
+      7,18,34,40,59,67,72,93,101,113,127,140,148,160,167,178
+    ),
+    "Wood Packaging" = c(4, 22, 31, 44, 50, 64, 77, 92, 97, 112, 119, 131, 150, 157, 173, 182),
+    "Rail" = c(
+      3,19,25,41,53,63,71,89,96,117,122,137,153,163,172,177,
+      9,16,33,38,49,66,74,83,105,110,126,130,143,161,171,187
+    ),
+    "Paper" = c(47, 94, 141, 188),
+    "Softwood Misc." = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
+    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209)
+    # "Miscellaneous" is added below (anything not listed)
+  )
+  
+  # ---- Build [year x EndUseID] in MMT C, then map exclusively to bins ----
+  # Sum across ownership (dim 2), keep EndUseID (dim 1) and year (dim 3)
+  mat_enduse <- t(apply(hwp$eu_array, c(1, 3), sum)) / 1e6   # [year x EndUseID]
+  n_ids <- ncol(mat_enduse)
+  if (is.null(n_ids)) n_ids <- 0
+  if (n_ids == 0) stop("eu_array appears empty or has unexpected dimensions.")
+  
+  # exclusive mapping: first bin that mentions an ID claims it
+  id_to_cat <- rep(NA_character_, n_ids)
+  for (cat in names(bin_defs)) {
+    ids <- intersect(bin_defs[[cat]], seq_len(n_ids))
+    free <- ids[is.na(id_to_cat[ids])]
+    id_to_cat[free] <- cat
+  }
+  id_to_cat[is.na(id_to_cat)] <- "Miscellaneous"
+  
+  # aggregate by category
+  cat_levels_all <- c(names(bin_defs), "Miscellaneous")
+  present <- intersect(cat_levels_all, unique(id_to_cat))
+  cat_mat <- sapply(present, function(cat) {
+    cols <- which(id_to_cat == cat)
+    if (!length(cols)) return(rep(0, nrow(mat_enduse)))
+    rowSums(mat_enduse[, cols, drop = FALSE], na.rm = TRUE)
+  })
+  cat_mat <- as.matrix(cat_mat)
+  rownames(cat_mat) <- years
+  
+  # ---- Long df ----
+  df <- as.data.frame(cat_mat)
+  df$Year <- years
+  long <- tidyr::pivot_longer(df, -Year, names_to = "Category", values_to = "Value")
+  
+  if (summary == "cumulative") {
+    long <- long |>
+      dplyr::group_by(Category) |>
+      dplyr::mutate(Value = cumsum(Value)) |>
+      dplyr::ungroup()
+  }
+  
+  # Metric label/convert
+  ylab <- "MMT C"
+  if (metric == "CO2e") {
+    long$Value <- long$Value * (44/12)
+    ylab <- expression("MMT C"*O[2]*e)
+  } else if (metric == "BBF") {
+    ylab <- "BBF"  # (no conversion applied; adjust if you have a factor)
+  }
+  
+  # Total line from stack
+  df_total <- long |>
+    dplyr::group_by(Year) |>
+    dplyr::summarise(Total = sum(Value, na.rm = TRUE), .groups = "drop")
+  
+  # Axis
+  yr_env <- long |>
+    dplyr::group_by(Year) |>
+    dplyr::summarise(pos = sum(pmax(Value, 0), na.rm = TRUE),
+                     neg = sum(pmin(Value, 0), na.rm = TRUE), .groups = "drop")
+  ax <- .axis_pretty(c(yr_env$pos, yr_env$neg), positive_only = FALSE)
+  
+  # Order in legend/stack (adjust to taste)
+  plot_levels <- c("Fuel","Furniture","Housing and Construction","Wood Packaging",
+                   "Rail","Paper","Softwood Misc.","Hardwood Misc.","Miscellaneous")
+  present_levels <- intersect(plot_levels, unique(long$Category))
+  long$Category <- factor(long$Category, levels = present_levels)
+  
+  pal <- setNames(viridisLite::viridis(length(present_levels), option = "D",
+                                       end = 0.95, begin = 0.05),
+                  present_levels)
+  
+  # ---- Plot ----
+  if (mode %in% c("category","category_total")) {
+    p <- ggplot(long, aes(Year, Value, fill = Category)) +
+      geom_area(alpha = 0.85, color = "white", linewidth = 0.2) +
+      geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
+      scale_fill_manual(values = pal, breaks = present_levels, name = "Product category") +
+      scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
+                         limits = c(ax$min, ax$max), expand = c(0, 0)) +
+      labs(x = "Harvest Year", y = ylab,
+           title = paste0(if (summary == "cumulative") "Cumulative" else "Annual",
+                          " timber harvest by product category")) +
+      theme_bw(base_size = 14) +
+      theme(legend.position = "right")
+    
+    if (mode == "category_total") {
+      p <- p +
+        geom_line(data = df_total, aes(Year, Total, color = "Total"),
+                  linewidth = 0.9, inherit.aes = FALSE) +
+        scale_color_manual(values = c(Total = "black"), name = NULL)
+    }
+    return(p)
+  }
+  
+  # mode == "total"
+  ggplot(df_total, aes(Year, Total)) +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
+    geom_line(linewidth = 1.0) +
+    scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
+                       limits = c(ax$min, ax$max), expand = c(0, 0)) +
+    labs(x = "Harvest Year", y = ylab,
+         title = paste0(if (summary == "cumulative") "Cumulative" else "Annual",
+                        " timber harvest (total)")) +
+    theme_bw(base_size = 14)
+}
+
+
+p_cat <- plot_ann_timber_by_enduse_bins(
+  hwp,
+  metric  = "MMTC",        # or "CO2e"
+  summary = "annual",      # or "cumulative"
+  mode    = "category_total"  # "category" or "total"
+)
+print(p_cat)
 
 # =========================================================
 # 1) Annual Harvest and Trade (AnnHarvestandTrade)
@@ -342,7 +513,6 @@ plot_annual_net_change <- function(
   approach   <- match.arg(approach)
   metrictype <- match.arg(metrictype)
   
-  # Fallback axis helper (ASCII only)
   if (!exists(".axis_pretty", mode = "function")) {
     .axis_pretty <- function(x, positive_only = FALSE, n = 6) {
       x <- x[is.finite(x)]
@@ -357,16 +527,13 @@ plot_annual_net_change <- function(
   years    <- .get_years(hwp)
   id_total <- .idx_total(hwp)
   
-  # Sum across owner & class to one value per YEAR
   psum_dim2 <- function(arr) apply(arr[, id_total, , drop = FALSE], 3, sum, na.rm = TRUE)
   
-  # Totals (Tg C -> MMT C)
-  pu  <- psum_dim2(hwp$pu.final_array)   / 1e6  # cumulative
-  sw  <- psum_dim2(hwp$swdsCtotal_array) / 1e6  # cumulative
-  eec <- psum_dim2(hwp$eec_array)        / 1e6  # annual
-  ewo <- psum_dim2(hwp$ewoec_array)      / 1e6  # annual
+  pu  <- psum_dim2(hwp$pu.final_array)   / 1e6
+  sw  <- psum_dim2(hwp$swdsCtotal_array) / 1e6
+  eec <- psum_dim2(hwp$eec_array)        / 1e6
+  ewo <- psum_dim2(hwp$ewoec_array)      / 1e6
   
-  # Annual changes aligned to year t
   pu_ch    <- diff(pu)
   sw_ch    <- diff(sw)
   eec_ch   <- eec[-1]
@@ -376,37 +543,35 @@ plot_annual_net_change <- function(
     Year        = years[-1],
     SWDSchange  = sw_ch,
     PUchange    = pu_ch,
-    EECchange   = -eec_ch,     # plot emissions downward
+    EECchange   = -eec_ch,
     EWOECchange = -ewoec_ch,
     stringsAsFactors = FALSE
   )
   
-  # Net stock change; and consumption inflow (Domestic + Imports - Exports)
   df$Net    <- df$SWDSchange + df$PUchange
   df$Inflow <- df$PUchange + df$SWDSchange - df$EECchange - df$EWOECchange
   
-  # Metric & labels
-  if (metrictype == "CO2e") {
+  ylab <- if (metrictype == "CO2e") {
     df[, setdiff(names(df), "Year")] <- df[, setdiff(names(df), "Year")] * (44/12)
-    ylab <- "MMT CO2e"
-  } else {
-    ylab <- "MMT C"
-  }
+    "MMT CO2e"
+  } else "MMT C"
   
   if (approach == "production") {
-    # Single stacked layer; PIU bottom, SWDS top via factor order
+    # Build stacked data with PIU then SWDS
     bar <- rbind(
       data.frame(Year = df$Year, series = "PUchange",   val = df$PUchange,   stringsAsFactors = FALSE),
       data.frame(Year = df$Year, series = "SWDSchange", val = df$SWDSchange, stringsAsFactors = FALSE)
     )
+    # Factor order controls bottom->top when we use reverse=TRUE below
     bar$series <- factor(bar$series, levels = c("PUchange","SWDSchange"))
     
     ax <- .axis_pretty(c(bar$val, if (isTRUE(include_net_line)) df$Net), positive_only = FALSE)
     
     p <- ggplot(bar, aes(Year, val, fill = series)) +
-      geom_col() +
+      geom_col(position = position_stack(reverse = TRUE)) +  # <-- PIU bottom, SWDS top
       geom_hline(yintercept = 0, color = "black", linewidth = 0.6) +
       scale_fill_manual(
+        limits = c("PUchange","SWDSchange"),                 # keeps intended order
         values = c(SWDSchange = "#B42E8D", PUchange = "#7801A8"),
         breaks = c("SWDSchange","PUchange"),
         labels = c("Solid Waste Disposal Sites", "Products in Use"),
@@ -415,7 +580,7 @@ plot_annual_net_change <- function(
       scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
                          limits = c(ax$min, ax$max), expand = c(0, 0)) +
       labs(x = "Year", y = ylab,
-           title = "B) Annual Net Change in Carbon Storage -- Production Approach") +
+           title = "Annual Net Change in Carbon Storage -- Production Approach") +
       theme_bw(base_size = 14)
     
     if (isTRUE(include_net_line)) {
@@ -433,7 +598,6 @@ plot_annual_net_change <- function(
     data.frame(Year = df$Year, series = "EWOECchange",   val = df$EWOECchange,   stringsAsFactors = FALSE),
     data.frame(Year = df$Year, series = "EECchange",     val = df$EECchange,     stringsAsFactors = FALSE)
   )
-  # bottom -> top stacking order
   bar$series <- factor(bar$series, levels = c("Inflow","EECchange","EWOECchange"))
   
   ax <- .axis_pretty(c(bar$val, if (isTRUE(include_net_line)) df$Net), positive_only = FALSE)
@@ -452,7 +616,7 @@ plot_annual_net_change <- function(
     scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
                        limits = c(ax$min, ax$max), expand = c(0, 0)) +
     labs(x = "Year", y = ylab,
-         title = "B) Annual Net Change in Carbon Storage -- Simple-decay Approach (alternative)") +
+         title = "Annual Net Change in Carbon Storage -- Simple-decay Approach") +
     theme_bw(base_size = 14)
   
   if (isTRUE(include_net_line)) {
@@ -463,6 +627,7 @@ plot_annual_net_change <- function(
   }
   return(p)
 }
+
 
 
 # ---- Example: Production approach with Net line ----
