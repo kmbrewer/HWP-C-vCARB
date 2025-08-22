@@ -5,7 +5,7 @@ library(dplyr)
 library(tidyr)
 library(viridisLite)
 library(abind)
-library(reshape2)
+library(reshape2)  
 
 
 # ---- Build hwp from model.outputs -------------------------------------------
@@ -176,13 +176,16 @@ plot_ann_timber_by_enduse_bins <- function(
       7,18,34,40,59,67,72,93,101,113,127,140,148,160,167,178
     ),
     "Wood Packaging" = c(4, 22, 31, 44, 50, 64, 77, 92, 97, 112, 119, 131, 150, 157, 173, 182),
-    "Rail" = c(
+    "Manufacturing Misc." = c(2, 13, 30, 43, 51, 60, 80, 87, 106, 107, 118, 136, 149, 159, 166, 180),
+    "Other Industrial Products" = c(35, 82, 129, 176),
+    "Rail"  = c(
       3,19,25,41,53,63,71,89,96,117,122,137,153,163,172,177,
       9,16,33,38,49,66,74,83,105,110,126,130,143,161,171,187
     ),
     "Paper" = c(47, 94, 141, 188),
     "Softwood Misc." = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
-    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209)
+    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209), 
+    "Other, N.A." = c(6,23,32,45,55,61,76,88,98,109,120,135,151,156,174,179)
     # "Miscellaneous" is added below (anything not listed)
   )
   
@@ -247,8 +250,34 @@ plot_ann_timber_by_enduse_bins <- function(
   ax <- .axis_pretty(c(yr_env$pos, yr_env$neg), positive_only = FALSE)
   
   # Order in legend/stack (adjust to taste)
-  plot_levels <- c("Fuel","Furniture","Housing and Construction","Wood Packaging",
-                   "Rail","Paper","Softwood Misc.","Hardwood Misc.","Miscellaneous")
+  plot_levels <- c(
+    "Fuel",
+    "Furniture",
+    "Housing and Construction",
+    "Wood Packaging",
+    "Manufacturing Misc.",
+    "Other Industrial Products",
+    "Rail",
+    "Paper",
+    "Softwood Misc.",
+    "Hardwood Misc.",
+    "Other",
+    "Miscellaneous"
+  )
+  pal_cat <- c(
+    "Fuel"                     = "#EE7733",  # orange
+    "Furniture"                = "#0077BB",  # blue
+    "Housing and Construction" = "#009988",  # teal
+    "Wood Packaging"           = "#33BBEE",  # sky
+    "Manufacturing Misc."      = "#EE3377",  # magenta
+    "Other Industrial Products"= "#CC3311",  # vermilion
+    "Rail"                     = "#228833",  # green
+    "Paper"                    = "#CCBB44",  # yellow-olive
+    "Softwood Misc."           = "#332288",  # navy-purple
+    "Hardwood Misc."           = "#AA4499",  # purple
+    "Other"                    = "#999933",  # olive-brown
+    "Miscellaneous"            = "#BBBBBB"   # gray
+  )
   present_levels <- intersect(plot_levels, unique(long$Category))
   long$Category <- factor(long$Category, levels = present_levels)
   
@@ -261,7 +290,11 @@ plot_ann_timber_by_enduse_bins <- function(
     p <- ggplot(long, aes(Year, Value, fill = Category)) +
       geom_area(alpha = 0.85, color = "white", linewidth = 0.2) +
       geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
-      scale_fill_manual(values = pal, breaks = present_levels, name = "Product category") +
+      scale_fill_manual(
+        values = pal_cat,
+        breaks = plot_levels,
+        name   = "Product category"
+      ) +
       scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
                          limits = c(ax$min, ax$max), expand = c(0, 0)) +
       labs(x = "Harvest Year", y = ylab,
@@ -292,6 +325,7 @@ plot_ann_timber_by_enduse_bins <- function(
 }
 
 
+
 p_cat <- plot_ann_timber_by_enduse_bins(
   hwp,
   metric  = "MMTC",        # or "CO2e"
@@ -299,6 +333,8 @@ p_cat <- plot_ann_timber_by_enduse_bins(
   mode    = "category_total"  # "category" or "total"
 )
 print(p_cat)
+
+
 
 # =========================================================
 # 1) Annual Harvest and Trade (AnnHarvestandTrade)
