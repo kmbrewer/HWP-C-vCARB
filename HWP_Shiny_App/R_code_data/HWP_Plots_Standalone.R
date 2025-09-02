@@ -1,11 +1,14 @@
 # HWP_Plots_Standalone.R
 
+install.packages("ggpattern")
+
 library(ggplot2)
 library(dplyr)
 library(tidyr)
 library(viridisLite)
 library(abind)
-library(reshape2)  
+library(reshape2) 
+library(ggpattern)
 
 
 # ---- Build hwp from model.outputs -------------------------------------------
@@ -128,12 +131,7 @@ hwp <- make_hwp(model.outputs)
 .lab_co2e <- function(metrictype) if (metrictype=="CO2e") expression("Tg C"*O[2]*e) else "Tg C"
 
 
-# =========================================================
-# Annual timber harvest by PRODUCT CATEGORY (EndUseID bins)
-#   metric:  "MMTC" | "CO2e" | "BBF"
-#   summary: "annual" | "cumulative"
-#   mode:    "category_total" | "category" | "total"
-# =========================================================
+
 # =========================================================
 # Annual timber harvest by PRODUCT CATEGORY (EndUseID bins)
 #   metric:  "MMTC" | "CO2e" | "BBF"   (arrays assumed in MMT C)
@@ -145,26 +143,55 @@ plot_ann_timber_by_enduse_bins <- function(
     hwp,
     metric  = c("MMTC","CO2e","BBF"),
     summary = c("annual","cumulative"),
-    mode    = c("category_total","category","total")
+    mode    = c("category_total","category","total"),
+    keep_exports = TRUE
 ) {
   metric  <- match.arg(metric)
   summary <- match.arg(summary)
   mode    <- match.arg(mode)
   
-  # ---- helpers ----
   years <- .get_years(hwp)
   if (!exists(".axis_pretty", mode = "function")) {
     .axis_pretty <- function(x, positive_only = FALSE, n = 6) {
       x <- x[is.finite(x)]
       if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
-      rng <- range(x, na.rm = TRUE)
-      if (positive_only) rng[1] <- min(0, rng[1])
-      br <- pretty(rng, n = n)
-      list(min = min(br), max = max(br), by = diff(br)[1])
+      rng <- range(x, na.rm = TRUE); if (positive_only) rng[1] <- min(0, rng[1])
+      br <- pretty(rng, n = n); list(min = min(br), max = max(br), by = diff(br)[1])
     }
   }
   
-  # ---- EndUseID -> category bins (priority order = first wins) ----
+  # ---------- Collapse ownerships: drop "Total" after 1951; keep Exports as negative ----------
+  owns_raw   <- .get_ownerships(hwp)
+  owns_clean <- gsub("\\.", " ", owns_raw)
+  
+  idx_total   <- which(owns_clean == "Total")
+  idx_exports <- which(owns_clean == "Exports")
+  
+  # base owners exclude "Total"; optionally exclude "Exports"
+  idx_keep <- setdiff(seq_along(owns_clean), idx_total)
+  if (!keep_exports) idx_keep <- setdiff(idx_keep, idx_exports)
+  eu <- hwp$eu_array[, idx_keep, , drop = FALSE]  # [EndUseID, owner, year]
+  
+  # flip Exports negative if kept
+  if (keep_exports && length(idx_exports)) {
+    exp_in_keep <- which(owns_clean[idx_keep] == "Exports")
+    if (length(exp_in_keep)) eu[, exp_in_keep, ] <- -eu[, exp_in_keep, , drop = FALSE]
+  }
+  
+  # Sum across non-Total owners -> [year x EndUseID] in MMT C
+  mat_enduse <- t(apply(eu, c(1, 3), sum)) / 1e6
+  
+  # For years <= 1951, use "Total" slice if non-Total owners are zero
+  if (length(idx_total)) {
+    mat_total <- t(apply(hwp$eu_array[, idx_total, , drop = FALSE], c(1, 3), sum)) / 1e6
+    pre_mask <- years <= 1951
+    zero_rows <- rowSums(mat_enduse, na.rm = TRUE) == 0
+    rows_to_replace <- pre_mask & zero_rows
+    if (any(rows_to_replace)) mat_enduse[rows_to_replace, ] <- mat_total[rows_to_replace, ]
+  }
+  # --------------------------------------------------------------------------------------------
+  
+  # ---- EndUseID -> category bins (first match wins) ----
   bin_defs <- list(
     "Fuel" = c(1, 48, 95, 142, 197),
     "Furniture" = c(5, 20, 28, 42, 52, 68, 81, 84, 99, 116, 121, 139, 144, 155, 165, 186),
@@ -175,7 +202,7 @@ plot_ann_timber_by_enduse_bins <- function(
       8,17,29,39,54,70,75,90,103,111,123,138,147,158,175,181,
       7,18,34,40,59,67,72,93,101,113,127,140,148,160,167,178
     ),
-    "Wood Packaging" = c(4, 22, 31, 44, 50, 64, 77, 92, 97, 112, 119, 131, 150, 157, 173, 182),
+    "Packaging & Shipping" = c(4, 22, 31, 44, 50, 64, 77, 92, 97, 112, 119, 131, 150, 157, 173, 182),
     "Manufacturing Misc." = c(2, 13, 30, 43, 51, 60, 80, 87, 106, 107, 118, 136, 149, 159, 166, 180),
     "Other Industrial Products" = c(35, 82, 129, 176),
     "Rail"  = c(
@@ -184,33 +211,28 @@ plot_ann_timber_by_enduse_bins <- function(
     ),
     "Paper" = c(47, 94, 141, 188),
     "Softwood Misc." = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
-    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209), 
+    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209),
     "Other, N.A." = c(6,23,32,45,55,61,76,88,98,109,120,135,151,156,174,179)
-    # "Miscellaneous" is added below (anything not listed)
   )
   
-  # ---- Build [year x EndUseID] in MMT C, then map exclusively to bins ----
-  # Sum across ownership (dim 2), keep EndUseID (dim 1) and year (dim 3)
-  mat_enduse <- t(apply(hwp$eu_array, c(1, 3), sum)) / 1e6   # [year x EndUseID]
-  n_ids <- ncol(mat_enduse)
-  if (is.null(n_ids)) n_ids <- 0
+  n_ids <- ncol(mat_enduse); if (is.null(n_ids)) n_ids <- 0
   if (n_ids == 0) stop("eu_array appears empty or has unexpected dimensions.")
   
-  # exclusive mapping: first bin that mentions an ID claims it
+  # map IDs; drop anything unmapped (no 'Miscellaneous')
   id_to_cat <- rep(NA_character_, n_ids)
   for (cat in names(bin_defs)) {
-    ids <- intersect(bin_defs[[cat]], seq_len(n_ids))
+    ids  <- intersect(bin_defs[[cat]], seq_len(n_ids))
     free <- ids[is.na(id_to_cat[ids])]
-    id_to_cat[free] <- cat
+    id_to_cat[free] <- if (cat == "Other, N.A.") "Other" else cat
   }
-  id_to_cat[is.na(id_to_cat)] <- "Miscellaneous"
+  keep_cols <- which(!is.na(id_to_cat))  # remove "Miscellaneous" entirely
+  id_to_cat <- id_to_cat[keep_cols]
+  mat_enduse <- mat_enduse[, keep_cols, drop = FALSE]
   
   # aggregate by category
-  cat_levels_all <- c(names(bin_defs), "Miscellaneous")
-  present <- intersect(cat_levels_all, unique(id_to_cat))
+  present <- unique(id_to_cat)
   cat_mat <- sapply(present, function(cat) {
     cols <- which(id_to_cat == cat)
-    if (!length(cols)) return(rep(0, nrow(mat_enduse)))
     rowSums(mat_enduse[, cols, drop = FALSE], na.rm = TRUE)
   })
   cat_mat <- as.matrix(cat_mat)
@@ -230,71 +252,49 @@ plot_ann_timber_by_enduse_bins <- function(
   
   # Metric label/convert
   ylab <- "MMT C"
-  if (metric == "CO2e") {
-    long$Value <- long$Value * (44/12)
-    ylab <- expression("MMT C"*O[2]*e)
-  } else if (metric == "BBF") {
-    ylab <- "BBF"  # (no conversion applied; adjust if you have a factor)
-  }
+  if (metric == "CO2e") { long$Value <- long$Value * (44/12); ylab <- expression("MMT C"*O[2]*e) }
+  if (metric == "BBF")  { ylab <- "BBF" }
   
-  # Total line from stack
+  # Totals + axis
   df_total <- long |>
     dplyr::group_by(Year) |>
     dplyr::summarise(Total = sum(Value, na.rm = TRUE), .groups = "drop")
   
-  # Axis
   yr_env <- long |>
     dplyr::group_by(Year) |>
     dplyr::summarise(pos = sum(pmax(Value, 0), na.rm = TRUE),
                      neg = sum(pmin(Value, 0), na.rm = TRUE), .groups = "drop")
   ax <- .axis_pretty(c(yr_env$pos, yr_env$neg), positive_only = FALSE)
   
-  # Order in legend/stack (adjust to taste)
+  # ---------- ORIGINAL palette & order (no 'Miscellaneous') ----------
   plot_levels <- c(
-    "Fuel",
-    "Furniture",
-    "Housing and Construction",
-    "Wood Packaging",
-    "Manufacturing Misc.",
-    "Other Industrial Products",
-    "Rail",
-    "Paper",
-    "Softwood Misc.",
-    "Hardwood Misc.",
-    "Other",
-    "Miscellaneous"
+    "Fuel","Furniture","Housing and Construction","Packaging & Shipping",
+    "Manufacturing Misc.","Other Industrial Products","Rail","Paper",
+    "Softwood Misc.","Hardwood Misc.","Other"
   )
   pal_cat <- c(
-    "Fuel"                     = "#EE7733",  # orange
-    "Furniture"                = "#0077BB",  # blue
-    "Housing and Construction" = "#009988",  # teal
-    "Wood Packaging"           = "#33BBEE",  # sky
-    "Manufacturing Misc."      = "#EE3377",  # magenta
-    "Other Industrial Products"= "#CC3311",  # vermilion
-    "Rail"                     = "#228833",  # green
-    "Paper"                    = "#CCBB44",  # yellow-olive
-    "Softwood Misc."           = "#332288",  # navy-purple
-    "Hardwood Misc."           = "#AA4499",  # purple
-    "Other"                    = "#999933",  # olive-brown
-    "Miscellaneous"            = "#BBBBBB"   # gray
+    "Fuel"                     = "#EE7733",
+    "Furniture"                = "#0077BB",
+    "Housing and Construction" = "#009988",
+    "Packaging & Shipping"           = "#33BBEE",
+    "Manufacturing Misc."      = "#EE3377",
+    "Other Industrial Products"= "#CC3311",
+    "Rail"                     = "#228833",
+    "Paper"                    = "#CCBB44",
+    "Softwood Misc."           = "#332288",
+    "Hardwood Misc."           = "#AA4499",
+    "Other"                    = "#999933"
   )
   present_levels <- intersect(plot_levels, unique(long$Category))
-  long$Category <- factor(long$Category, levels = present_levels)
+  long$Category  <- factor(long$Category, levels = present_levels)
   
-  pal <- setNames(viridisLite::viridis(length(present_levels), option = "D",
-                                       end = 0.95, begin = 0.05),
-                  present_levels)
-  
-  # ---- Plot ----
   if (mode %in% c("category","category_total")) {
     p <- ggplot(long, aes(Year, Value, fill = Category)) +
       geom_area(alpha = 0.85, color = "white", linewidth = 0.2) +
       geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
-      scale_fill_manual(
-        values = pal_cat,
-        breaks = plot_levels,
-        name   = "Product category"
-      ) +
+      scale_fill_manual(values = pal_cat[present_levels],
+                        breaks = present_levels,
+                        name   = "Product category") +
       scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
                          limits = c(ax$min, ax$max), expand = c(0, 0)) +
       labs(x = "Harvest Year", y = ylab,
@@ -304,15 +304,13 @@ plot_ann_timber_by_enduse_bins <- function(
       theme(legend.position = "right")
     
     if (mode == "category_total") {
-      p <- p +
-        geom_line(data = df_total, aes(Year, Total, color = "Total"),
-                  linewidth = 0.9, inherit.aes = FALSE) +
+      p <- p + geom_line(data = df_total, aes(Year, Total, color = "Total"),
+                         linewidth = 0.9, inherit.aes = FALSE) +
         scale_color_manual(values = c(Total = "black"), name = NULL)
     }
     return(p)
   }
   
-  # mode == "total"
   ggplot(df_total, aes(Year, Total)) +
     geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
     geom_line(linewidth = 1.0) +
@@ -325,13 +323,13 @@ plot_ann_timber_by_enduse_bins <- function(
 }
 
 
-
 p_cat <- plot_ann_timber_by_enduse_bins(
   hwp,
   metric  = "MMTC",        # or "CO2e"
   summary = "annual",      # or "cumulative"
   mode    = "category_total"  # "category" or "total"
 )
+
 print(p_cat)
 
 
