@@ -44,8 +44,8 @@ library(usethis)
 ##########################################################################
 ###  Constants specific to the stand-alone version of the model
 GENERATE.SANKEY <- TRUE       # Set to FALSE if you do not want the code to generate a Sankey diagram.
-SANKEY.HARVEST.YEAR <- 1995   # Set to any year within your data range.
-SANKEY.YEARS.OF.DECAY <- 3    # Set to any number between 3 and 100.
+SANKEY.HARVEST.YEAR <- 2001   # Set to any year within your data range.
+QSANKEY.YEARS.OF.DECAY <- 3    # Set to any number between 3 and 100.
 
 ### Folder locations
 SHINY.CODE <- "HWP_Shiny_App/R_code_data/"              # Code chunks that both Shiny and the stand-alone model depend upon. They are stored in the Shiny app folder.
