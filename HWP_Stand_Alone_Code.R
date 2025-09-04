@@ -44,7 +44,7 @@ library(usethis)
 ##########################################################################
 ###  Constants specific to the stand-alone version of the model
 GENERATE.SANKEY <- TRUE       # Set to FALSE if you do not want the code to generate a Sankey diagram.
-SANKEY.HARVEST.YEAR <- 2001   # Set to any year within your data range.
+SANKEY.HARVEST.YEAR <- 1995   # Set to any year within your data range.
 QSANKEY.YEARS.OF.DECAY <- 3    # Set to any number between 3 and 100.
 
 ### Folder locations

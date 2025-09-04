@@ -999,6 +999,7 @@ p4 <- plot_carbon_storage_by_product_category(
 print(p4)
 
 
+
 # =========================================================
 # Cumulative carbon stocks by pool (PIU vs. SWDS)
 #    approach: "production" | "simple_decay"
@@ -1008,173 +1009,283 @@ print(p4)
 #  • Simple-decay: integrates (Domestic + Imports − Exports) − (EEC + EWOEC).
 #    If pool-level simple-decay stocks aren't available, splits the total
 #    using the Production pool shares for that year.
+
+.axis_pretty <- function(x, n = 6) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
+  br <- pretty(range(x, na.rm = TRUE), n = n)
+  list(min = min(br), max = max(br), by = diff(br)[1])
+}
+.clean_names <- function(x) if (is.null(x)) character(0) else gsub("\\.", " ", trimws(x))
+
+# Sum across EndUse + owners to a Year vector, preferring the "Total" owner slice.
+.series_total_or_sum <- function(arr, exclude_exports = FALSE) {
+  stopifnot(!is.null(arr))
+  dn2  <- .clean_names(dimnames(arr)[[2]])
+  nOwn <- dim(arr)[2]
+  if (!length(dn2)) dn2 <- paste0("Owner", seq_len(nOwn))
+  idx_total   <- which(dn2 == "Total")
+  idx_exports <- which(dn2 == "Exports")
+  if (length(idx_total)) {
+    apply(arr[, idx_total, , drop = FALSE], 3, sum, na.rm = TRUE)
+  } else {
+    keep <- seq_len(nOwn)
+    if (exclude_exports && length(idx_exports)) keep <- setdiff(keep, idx_exports)
+    apply(arr[, keep, , drop = FALSE], 3, sum, na.rm = TRUE)
+  }
+}
+
+# Safe years retrieval
+.get_years <- function(hwp) {
+  y <- hwp$years
+  if (!is.null(y)) return(as.numeric(y))
+  for (nm in c("eu_array", "pu.final_array", "swdsCtotal_array", "eec_array")) {
+    if (!is.null(hwp[[nm]])) {
+      yy <- suppressWarnings(as.numeric(dimnames(hwp[[nm]])[[3]]))
+      if (!all(is.na(yy))) return(yy)
+    }
+  }
+  stop("hwp$years is required or must be derivable from array dimnames[[3]].")
+}
+
+# =========================================================
+# A) Cumulative carbon stocks by pool (PIU vs. SWDS) — PRODUCTION
+#    approach reads pu.final_array & swdsCtotal_array (Total slice).
 # =========================================================
 plot_cumulative_stocks_by_pool <- function(
     hwp,
-    approach = c("production","simple_decay"),
-    metric   = c("MMTC","CO2e"),
-    include_total_line = TRUE
+    metric             = c("MMTC","CO2e"),
+    include_total_line = TRUE,
+    y_min = NA,    # optional fixed y-limits; leave NA to auto-compute
+    y_max = NA
 ) {
-  approach <- match.arg(approach)
-  metric   <- match.arg(metric)
+  metric <- match.arg(metric)
   
-  # ---------- small helpers ----------
-  axis_pretty <- function(x) {
-    x <- x[is.finite(x)]
-    if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
-    br <- pretty(range(x, na.rm = TRUE))
-    list(min = min(br), max = max(br), by = diff(br)[1])
-  }
-  clean <- function(x) gsub("\\.", " ", trimws(x))
-  # prefer "Total" slice; otherwise sum owners (optionally exclude Exports)
-  series_total_or_sum <- function(arr, exclude_exports = FALSE) {
-    own <- clean(dimnames(arr)[[2]])
-    idx_total   <- which(own == "Total")
-    idx_exports <- which(own == "Exports")
-    if (length(idx_total)) {
-      apply(arr[, idx_total, , drop = FALSE], 3, sum, na.rm = TRUE)
-    } else {
-      keep <- seq_along(own)
-      if (exclude_exports && length(idx_exports)) keep <- setdiff(keep, idx_exports)
-      apply(arr[, keep, , drop = FALSE], 3, sum, na.rm = TRUE)
-    }
+  years <- .get_years(hwp)
+  if (is.null(hwp$pu.final_array) || is.null(hwp$swdsCtotal_array)) {
+    stop("Production approach needs hwp$pu.final_array and hwp$swdsCtotal_array.")
   }
   
-  # ---------- core inputs ----------
-  years <- hwp$years
-  if (is.null(years)) {
-    years <- as.numeric(dimnames(hwp$pu.final_array)[[3]])
-    if (is.null(years)) stop("hwp$years is required.")
-  }
+  pu   <- .series_total_or_sum(hwp$pu.final_array)   / 1e6  # MMT C
+  swds <- .series_total_or_sum(hwp$swdsCtotal_array) / 1e6
+  df <- data.frame(Year = years, PIU = pu, SWDS = swds, Total = pu + swds)
   
-  # ---------- PRODUCTION approach ----------
-  if (approach == "production") {
-    if (is.null(hwp$pu.final_array) || is.null(hwp$swdsCtotal_array))
-      stop("Production approach needs hwp$pu.final_array and hwp$swdsCtotal_array.")
-    pu   <- series_total_or_sum(hwp$pu.final_array)   / 1e6  # MMT C
-    swds <- series_total_or_sum(hwp$swdsCtotal_array) / 1e6
-    
-    df <- data.frame(
-      Year  = years,
-      PIU   = pu,
-      SWDS  = swds,
-      Total = pu + swds
-    )
-    
-  } else {
-    # ---------- SIMPLE-DECAY approach ----------
-    if (is.null(hwp$eu_array) || is.null(hwp$eec_array) || is.null(hwp$ewoec_array))
-      stop("Simple-decay approach needs hwp$eu_array, hwp$eec_array, and hwp$ewoec_array.")
-    
-    # Consumption inflow = Domestic + Imports − Exports (sum EndUse & owners, exclude "Total")
-    owns <- clean(dimnames(hwp$eu_array)[[2]])
-    idx_total   <- which(owns == "Total")
-    idx_exports <- which(owns == "Exports")
-    idx_keep    <- setdiff(seq_along(owns), idx_total)
-    
-    eu <- hwp$eu_array[, idx_keep, , drop = FALSE]
-    if (length(idx_exports)) {
-      exp_in_keep <- which(owns[idx_keep] == "Exports")
-      if (length(exp_in_keep)) eu[, exp_in_keep, ] <- -eu[, exp_in_keep, , drop = FALSE]
-    }
-    inflow <- apply(eu, 3, sum, na.rm = TRUE) / 1e6  # MMT C
-    
-    # Emissions (prefer "Total"; otherwise sum owners but exclude Exports)
-    eec   <- series_total_or_sum(hwp$eec_array,   exclude_exports = TRUE) / 1e6
-    ewoec <- series_total_or_sum(hwp$ewoec_array, exclude_exports = TRUE) / 1e6
-    
-    # Total simple-decay stock (cumulative)
-    total_sd <- cumsum(inflow - eec - ewoec)
-    
-    # Try to find pool-level simple-decay stocks; otherwise split by Production shares
-    get_first <- function(x, nm) if (!is.null(x[[nm]])) x[[nm]] else NULL
-    pu_sd   <- get_first(hwp, "pu.simple_array")
-    sw_sd   <- get_first(hwp, "swds.simple_array")
-    if (!is.null(pu_sd) && !is.null(sw_sd)) {
-      # Sum EndUse; prefer "Total"
-      pu_sd <- series_total_or_sum(pu_sd) / 1e6
-      sw_sd <- series_total_or_sum(sw_sd) / 1e6
-      df <- data.frame(Year = years, PIU = pu_sd, SWDS = sw_sd, Total = pu_sd + sw_sd)
-    } else {
-      # Fallback: use Production shares for the split
-      if (is.null(hwp$pu.final_array) || is.null(hwp$swdsCtotal_array))
-        stop("To split simple-decay stocks by pool, production stocks are needed (pu.final_array & swdsCtotal_array).")
-      pu_prod   <- series_total_or_sum(hwp$pu.final_array)   / 1e6
-      sw_prod   <- series_total_or_sum(hwp$swdsCtotal_array) / 1e6
-      tot_prod  <- pu_prod + sw_prod
-      pu_share  <- ifelse(tot_prod > 0, pu_prod / tot_prod, 0)
-      sw_share  <- 1 - pu_share
-      df <- data.frame(
-        Year  = years,
-        PIU   = total_sd * pu_share,
-        SWDS  = total_sd * sw_share,
-        Total = total_sd
-      )
-    }
-  }
-  
-  # ---------- unit conversion ----------
-  ylab <- "MMT C"
+  # Metric conversion
   if (metric == "CO2e") {
-    df[c("PIU","SWDS","Total")] <- df[c("PIU","SWDS","Total")] * (44/12)
-    ylab <- expression("MMT C"*O[2]*e)
+    df[c("PIU","SWDS","Total")] <- lapply(df[c("PIU","SWDS","Total")], function(v) v * (44/12))
+  }
+  ylab <- if (metric == "CO2e") expression("MMT CO"[2]*"e") else "MMT C"
+  
+  # Axis
+  if (is.na(y_min) || is.na(y_max)) {
+    ax <- .axis_pretty(df$Total)
+    if (is.na(y_min)) y_min <- ax$min
+    if (is.na(y_max)) y_max <- ax$max
   }
   
-  # ---------- plot ----------
-  ax <- axis_pretty(df$Total)
-  long <- tidyr::pivot_longer(df, c(PIU, SWDS), names_to = "Pool", values_to = "Value")
-  long$Pool <- factor(long$Pool, levels = c("PIU","SWDS"))
+  long <- rbind(
+    data.frame(Year = df$Year, pool = "Products in Use",            Value = df$PIU),
+    data.frame(Year = df$Year, pool = "Solid Waste Disposal Sites", Value = df$SWDS)
+  )
   
-  p <- ggplot2::ggplot(long, ggplot2::aes(Year, Value, fill = Pool)) +
-    ggplot2::geom_area(alpha = 0.9, color = "white", linewidth = 0.25) +
-    ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 0.6) +
+  p <- ggplot2::ggplot(long, ggplot2::aes(Year, Value, fill = pool)) +
+    ggplot2::geom_area(color = "black", linewidth = 0.2, alpha = 0.95) +
     ggplot2::scale_fill_manual(
-      values = c(PIU = "#4B2E83", SWDS = "#B42E8D"),
-      labels = c("Products in Use", "Solid Waste Disposal Sites"),
-      name = NULL
+      values = c("Products in Use" = "#6F00A8", "Solid Waste Disposal Sites" = "#C6508F")
     ) +
-    ggplot2::scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
-                                limits = c(ax$min, ax$max), expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(limits = c(y_min, y_max), expand = c(0, 0)) +
     ggplot2::labs(
-      x = "Harvest Year",
-      y = ylab,
-      title = paste0(
-        "Cumulative carbon stocks by pool — ",
-        if (approach == "production") "Production" else "Simple-decay",
-        " approach"
-      )
+      x = "Year", y = ylab,
+      title = "Cumulative carbon stocks by pool — Production approach"
     ) +
     ggplot2::theme_bw(base_size = 14) +
-    ggplot2::theme(legend.position = "bottom")
+    ggplot2::theme(legend.title = ggplot2::element_blank())
   
   if (isTRUE(include_total_line)) {
     p <- p +
-      ggplot2::geom_line(data = df, ggplot2::aes(Year, Total, color = "Total"),
-                         linewidth = 1.05, inherit.aes = FALSE) +
+      ggplot2::geom_line(
+        data = df, ggplot2::aes(Year, Total, color = "Total"),
+        linewidth = 0.8, inherit.aes = FALSE
+      ) +
       ggplot2::scale_color_manual(values = c(Total = "black"), name = NULL)
   }
   p
 }
 
-# ---------------------- Examples ----------------------
-# Production approach (MMT C)
-p_prod <- plot_cumulative_stocks_by_pool(
-  hwp,
-  approach = "production",
-  metric   = "MMTC",
-  include_total_line = TRUE
-)
+# =========================================================
+# B) Cumulative simple-decay accounting
+#    Stacks cumulative inflow (Domestic + Imports − Exports) vs.
+#    cumulative EEC and EWOEC; overlays net cumulative stock.
+#    Use y_min/y_max to force axis (e.g., y_min = -500, y_max = 900).
+# =========================================================
+plot_cumulative_simple_decay <- function(
+    hwp,
+    metric = c("MMTC","CO2e"),
+    include_net_line  = TRUE,
+    show_eec_outlines = TRUE,
+    y_min = -600,        # <- force this lower bound
+    y_max = NULL         # <- optional upper bound (NULL = auto)
+) {
+  metric <- match.arg(metric)
+  
+  # ---- helpers ----
+  clean_names <- function(x) if (is.null(x)) character(0) else gsub("\\.", " ", trimws(x))
+  years_from  <- function(arr) suppressWarnings(as.numeric(dimnames(arr)[[3]]))
+  
+  # ---- years ----
+  years <- hwp$years
+  if (is.null(years)) {
+    cand <- c(years_from(hwp$eu_array), years_from(hwp$eec_array), years_from(hwp$ewoec_array))
+    cand <- cand[is.finite(cand)]
+    if (!length(cand)) stop("Could not determine years from 'hwp'.")
+    years <- sort(unique(cand))
+  }
+  
+  # ---- inputs ----
+  if (is.null(hwp$eu_array) || is.null(hwp$eec_array) || is.null(hwp$ewoec_array)) {
+    stop("Need eu_array, eec_array, and ewoec_array in 'hwp'.")
+  }
+  
+  # Consumption inflow = Domestic + Imports − Exports
+  owns <- clean_names(dimnames(hwp$eu_array)[[2]])
+  nOwn <- dim(hwp$eu_array)[2]; if (!length(owns)) owns <- paste0("Owner", seq_len(nOwn))
+  idx_total   <- which(owns == "Total")
+  idx_imports <- which(owns == "Imports")
+  idx_exports <- which(owns == "Exports")
+  idx_dom     <- setdiff(seq_len(nOwn), c(idx_total, idx_imports, idx_exports))
+  
+  sum_owner <- function(arr, idx) {
+    if (!length(idx)) return(rep(0, length(years)))
+    as.numeric(apply(arr[, idx, , drop = FALSE], 3, sum, na.rm = TRUE))
+  }
+  
+  eu_total   <- if (length(idx_total))   sum_owner(hwp$eu_array, idx_total)   else rep(NA_real_, length(years))
+  eu_imports <- if (length(idx_imports)) sum_owner(hwp$eu_array, idx_imports) else rep(0, length(years))
+  eu_exports <- if (length(idx_exports)) sum_owner(hwp$eu_array, idx_exports) else rep(0, length(years))
+  eu_dom     <- if (length(idx_dom))     sum_owner(hwp$eu_array, idx_dom)     else rep(0, length(years))
+  
+  need_fix <- (eu_dom == 0) & is.finite(eu_total)
+  if (any(need_fix)) eu_dom[need_fix] <- eu_total[need_fix] - eu_imports[need_fix] - eu_exports[need_fix]
+  
+  inflow <- (eu_dom + eu_imports - eu_exports) / 1e6  # MMT C
+  
+  # Emissions (Total if present; else owners excluding Exports)
+  sum_total_or_exclude_exports <- function(arr) {
+    o <- clean_names(dimnames(arr)[[2]]); n <- dim(arr)[2]
+    if (!length(o)) o <- paste0("Owner", seq_len(n))
+    i_total   <- which(o == "Total")
+    i_exports <- which(o == "Exports")
+    if (length(i_total)) {
+      as.numeric(apply(arr[, i_total, , drop = FALSE], 3, sum, na.rm = TRUE))
+    } else {
+      keep <- setdiff(seq_len(n), i_exports)
+      as.numeric(apply(arr[, keep, , drop = FALSE], 3, sum, na.rm = TRUE))
+    }
+  }
+  eec   <- sum_total_or_exclude_exports(hwp$eec_array)   / 1e6
+  ewoec <- sum_total_or_exclude_exports(hwp$ewoec_array) / 1e6
+  
+  # Cumulative series
+  cin   <- cumsum(inflow)
+  cEEC  <- cumsum(eec)
+  cEWO  <- cumsum(ewoec)
+  net   <- cin - cEEC - cEWO
+  
+  # Metric conversion
+  conv  <- if (metric == "CO2e") 44/12 else 1
+  cin  <- cin  * conv; cEEC <- cEEC * conv; cEWO <- cEWO * conv; net <- net * conv
+  ylab <- if (metric == "CO2e") "MMT CO2e" else "MMT C"
+  
+  # Long data for stacked areas
+  pos_df <- data.frame(
+    Year = years,
+    series = factor("Consumption inflow (cum.)",
+                    levels = c("Consumption inflow (cum.)",
+                               "Emitted with Energy Capture (cum.)",
+                               "Emitted without Energy Capture (cum.)")),
+    Value = cin
+  )
+  neg_df <- rbind(
+    data.frame(Year = years, series = "Emitted with Energy Capture (cum.)",    Value = -cEEC),
+    data.frame(Year = years, series = "Emitted without Energy Capture (cum.)", Value = -cEWO)
+  )
+  neg_df$series <- factor(neg_df$series,
+                          levels = c("Emitted with Energy Capture (cum.)",
+                                     "Emitted without Energy Capture (cum.)"))
+  
+  # ---- hard axis limits ----
+  pos_max   <- max(pos_df$Value, 0, na.rm = TRUE)
+  y_lo <- y_min                      # <- force this value
+  y_hi <- if (is.null(y_max)) max(pos_max, 0) else y_max
+  y_breaks <- pretty(c(y_lo, y_hi), n = 7)
+  
+  # ---- plot ----
+  p <- ggplot2::ggplot() +
+    ggplot2::geom_area(data = pos_df,
+                       ggplot2::aes(Year, Value, fill = series)) +
+    ggplot2::geom_area(data = neg_df,
+                       ggplot2::aes(Year, Value, fill = series),
+                       position = ggplot2::position_stack(reverse = TRUE)) +
+    ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 0.6) +
+    ggplot2::scale_fill_manual(
+      values = c("Consumption inflow (cum.)"             = "#00CED1",
+                 "Emitted with Energy Capture (cum.)"    = "#F8DF25",
+                 "Emitted without Energy Capture (cum.)" = "#F99A3E"),
+      breaks = c("Consumption inflow (cum.)",
+                 "Emitted with Energy Capture (cum.)",
+                 "Emitted without Energy Capture (cum.)"),
+      name = NULL
+    ) +
+    ggplot2::scale_y_continuous(limits = c(y_lo, y_hi),
+                                breaks = y_breaks,
+                                expand = c(0, 0)) +
+    ggplot2::coord_cartesian(ylim = c(y_lo, y_hi), expand = FALSE, clip = "on") +  # <- belt & suspenders
+    ggplot2::labs(x = "Year", y = ylab,
+                  title = "Cumulative carbon accounting — Simple-decay approach") +
+    ggplot2::theme_bw(base_size = 14)
+  
+  if (isTRUE(show_eec_outlines)) {
+    p <- p +
+      ggplot2::geom_line(data = data.frame(Year = years, y = -cEEC),
+                         ggplot2::aes(Year, y),
+                         color = "#C1B000", linewidth = 0.6, inherit.aes = FALSE) +
+      ggplot2::geom_line(data = data.frame(Year = years, y = -(cEEC + cEWO)),
+                         ggplot2::aes(Year, y),
+                         color = "#D66A1A", linewidth = 0.6, inherit.aes = FALSE)
+  }
+  
+  if (isTRUE(include_net_line)) {
+    p <- p +
+      ggplot2::geom_line(data = data.frame(Year = years, Net = net),
+                         ggplot2::aes(Year, Net, color = "Net cumulative stock"),
+                         linewidth = 0.9) +
+      ggplot2::scale_color_manual(values = c("Net cumulative stock" = "#2E8B57"),
+                                  name = NULL)
+  }
+  
+  p
+}
+
+
+# =========================
+# Example usage
+# =========================
+# Production approach
+p_prod <- plot_cumulative_stocks_by_pool(hwp, metric = "MMTC", include_total_line = TRUE)
 print(p_prod)
 
-# Simple-decay approach (MMT C). If pool-level simple-decay stocks
-# aren't present in `hwp`, the split uses Production pool shares.
-p_sd <- plot_cumulative_stocks_by_pool(
+# Simple-decay cumulative (force axis if desired)
+p_sd <- plot_cumulative_simple_decay(
   hwp,
-  approach = "simple_decay",
-  metric   = "MMTC",
-  include_total_line = TRUE
+  metric = "MMTC",
+  include_net_line = TRUE,
+  y_min = -500,  # negative bound
+  y_max =  900   # positive bound
 )
 print(p_sd)
+
+
+
 
 
 # =========================================================
@@ -1370,77 +1481,174 @@ p5 <- plot_carbon_storage_by_ownership(
 )
 print(p5)
 
-dimnames(hwp$pu.final_array)[[2]]
-dimnames(hwp$swdsCtotal_array)[[2]]
-hwp$ownership.names
-
-
-
 
 
 # =========================================================
 # 6) Monte Carlo Estimates
-#    plot.type: 1 (pools facet) | 2 (combined pools) | 3 (convergence)
+#    plot.type: "1" (pools facet) | "2" (combined pools) | "3" (convergence)
+#    metrictype: "TgC" | "CO2e"
+#    You may pass mc_plot / mc_total / mc_iters explicitly, or keep NULL to pull from `hwp`.
 # =========================================================
-plot_mc_estimates <- function(hwp,
-                              plot.type = c(1,2,3),
-                              metrictype = c("TgC","CO2e")) {
-  plot.type <- match.arg(as.character(plot.type))
+plot_mc_estimates <- function(
+    hwp,
+    plot.type  = c("1","2","3"),
+    metrictype = c("TgC","CO2e"),
+    mc_plot  = NULL,
+    mc_total = NULL,
+    mc_iters = NULL
+) {
+  # ---------- resolve args ----------
+  plot.type  <- match.arg(as.character(plot.type), c("1","2","3"))
   metrictype <- match.arg(metrictype)
   
-  if (is.null(hwp$mc_iter_results) || is.null(hwp$mc_plot) || is.null(hwp$mc_PoolsTotalPlot)) {
-    stop("Monte Carlo outputs not found: need mc_plot, mc_PoolsTotalPlot, mc_iter_results in `hwp`.")
+  # ---------- helpers ----------
+  as_num <- function(x) suppressWarnings(as.numeric(x))
+  
+  pull_mc <- function(container, variants) {
+    # try explicit element access
+    for (nm in variants) {
+      val <- tryCatch(container[[nm]], error = function(...) NULL)
+      if (!is.null(val)) return(val)
+      # if `hwp` is an environment
+      if (is.environment(container) && exists(nm, envir = container, inherits = FALSE)) {
+        return(get(nm, envir = container, inherits = FALSE))
+      }
+    }
+    # fallback: try from the global env
+    for (nm in variants) {
+      val <- get0(nm, inherits = TRUE, ifnotfound = NULL)
+      if (!is.null(val)) return(val)
+    }
+    NULL
   }
   
-  # clone inputs; apply metric conversion if needed
-  mc_plot <- hwp$mc_plot
-  mc_total <- hwp$mc_PoolsTotalPlot
-  mc_iters <- hwp$mc_iter_results
-  ylab <- .lab_co2e(if (metrictype=="CO2e") "CO2e" else "TgC")
-  
-  if (metrictype == "CO2e") {
-    mc_plot[, 3:5] <- mc_plot[, 3:5] * (44/12)
-    mc_total[, 2:4] <- mc_total[, 2:4] * (44/12)
-    mc_iters$C <- mc_iters$C * (44/12)
+  std_mc_plot <- function(df) {
+    df <- as.data.frame(df); nm <- names(df)
+    if (!"Means" %in% nm) { cand <- intersect(c("Means","Mean","mean","avg"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "Means" }
+    if (!"lci"   %in% nm) { cand <- intersect(c("lci","LCI","lwr","lo","lower","ciLCI"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "lci" }
+    if (!"uci"   %in% nm) { cand <- intersect(c("uci","UCI","upr","hi","upper","ciUCI"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "uci" }
+    if (!"Type.M"%in% nm) { cand <- intersect(c("Type.M","Type","Pool","Series","series","pool"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "Type.M" }
+    for (v in c("Year","Means","lci","uci")) if (v %in% names(df)) df[[v]] <- as_num(df[[v]])
+    df
   }
   
+  std_mc_total <- function(df) {
+    df <- as.data.frame(df); nm <- names(df)
+    if (!"Mean" %in% nm) { cand <- intersect(c("Mean","Means","mean","avg"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "Mean" }
+    for (v in c("Year","Mean","lci","uci")) if (v %in% names(df)) df[[v]] <- as_num(df[[v]])
+    df
+  }
+  
+  std_mc_iters <- function(df) {
+    df <- as.data.frame(df); nm <- names(df)
+    if (!"iter"%in% nm) { cand <- intersect(c("iter","iteration","Iteration","it"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "iter" }
+    if (!"C"   %in% nm) { cand <- intersect(c("C","value","Value","sum","total","Total"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "C" }
+    if (!"stat"%in% nm) { cand <- intersect(c("stat","Stat","metric","which"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "stat" }
+    if ("C" %in% names(df))    df$C    <- as_num(df$C)
+    if ("iter" %in% names(df)) df$iter <- as_num(df$iter)
+    df
+  }
+  
+  # ---------- pull only what we need ----------
   if (plot.type == "1") {
-    ggplot(mc_plot, aes(Year, Means/1e6)) +
-      geom_ribbon(aes(ymin = lci/1e6, ymax = uci/1e6)) +
-      geom_line(color = "yellow") +
-      facet_wrap(~ Type.M, labeller = hwp$C.names) +
-      labs(x=NULL, y=ylab,
-           title=paste0("MC mean (yellow) and ", 100*hwp$MC.CI.REPORT, "% CI (black) — storage & emission pools")) +
-      theme_bw(base_size = 14) +
-      theme(axis.text.x = element_text(angle=45, hjust=1))
+    mc_plot <- mc_plot %||% pull_mc(hwp, c("mc_plot","MC_plot","mc.plot","mcPlot"))
+    if (is.null(mc_plot)) stop("`mc_plot` is required for plot.type = '1'.")
+    mc_plot <- std_mc_plot(mc_plot)
   } else if (plot.type == "2") {
-    ggplot(mc_total, aes(Year, Mean)) +
-      geom_ribbon(aes(ymin=lci, ymax=uci)) +
-      geom_line(color="yellow") +
-      labs(x=NULL, y=ylab,
-           title=paste0("MC mean (yellow) and ", 100*hwp$MC.CI.REPORT, "% CI (black) — PIU + SWDS")) +
-      theme_bw(base_size = 14)
-  } else {
-    end_yr <- mc_total$Year[nrow(mc_total)]
-    mc_iters$facet.labs <- as.character(sapply(mc_iters$stat, switch,
-                                               mean = "Mean",
-                                               se   = "Standard Error",
-                                               ciUCI= paste0(100*hwp$MC.CI.REPORT, "% CI, Upper"),
-                                               ciLCI= paste0(100*hwp$MC.CI.REPORT, "% CI, Lower")
-    ))
-    mc_iters$C <- mc_iters$C/1e6
-    ggplot(mc_iters, aes(iter, C)) +
-      geom_line() +
-      facet_wrap(~ facet.labs, scales = "free_y") +
-      labs(x="Iterations", y=ylab,
-           title=paste0("Convergence — PIU + SWDS, ", end_yr, " (N = ", hwp$N.ITER, ")")) +
-      theme_bw(base_size = 14)
+    mc_total <- mc_total %||% pull_mc(hwp, c("mc_PoolsTotalPlot","mc_total","mc_total_plot","mc.PoolsTotalPlot"))
+    if (is.null(mc_total)) stop("`mc_total` (aka `mc_PoolsTotalPlot`) is required for plot.type = '2'.")
+    mc_total <- std_mc_total(mc_total)
+  } else { # "3"
+    mc_iters <- mc_iters %||% pull_mc(hwp, c("mc_iter_results","mc.iters","mc_iters","mcIterResults"))
+    if (is.null(mc_iters)) stop("`mc_iters` (`mc_iter_results`) is required for plot.type = '3'.")
+    mc_iters <- std_mc_iters(mc_iters)
+    # optional, for title year
+    mc_total <- mc_total %||% pull_mc(hwp, c("mc_PoolsTotalPlot","mc_total","mc_total_plot","mc.PoolsTotalPlot"))
+    if (!is.null(mc_total)) mc_total <- std_mc_total(mc_total)
+  }
+  
+  # ---------- metric conversion ----------
+  ylab <- if (metrictype == "CO2e") "Tg CO\u2082e" else "Tg C"
+  if (metrictype == "CO2e") {
+    if (plot.type == "1") mc_plot[,  c("Means","lci","uci")] <- lapply(mc_plot[,  c("Means","lci","uci")], `*`, 44/12)
+    if (plot.type == "2") mc_total[, c("Mean","lci","uci")]  <- lapply(mc_total[, c("Mean","lci","uci")],  `*`, 44/12)
+    if (plot.type == "3") mc_iters$C <- mc_iters$C * (44/12)
+  }
+  
+  # ---------- labels ----------
+  labber <- if (!is.null(hwp$C.names)) ggplot2::as_labeller(hwp$C.names) else ggplot2::label_value
+  ci_pct <- tryCatch(100 * hwp$MC.CI.REPORT, error = function(...) 95)
+  
+  # ---------- plot ----------
+  if (plot.type == "1") {
+    ggplot2::ggplot(mc_plot, ggplot2::aes(Year, Means/1e6)) +
+      ggplot2::geom_ribbon(ggplot2::aes(ymin = lci/1e6, ymax = uci/1e6), fill = "grey85") +
+      ggplot2::geom_line(color = "yellow") +
+      ggplot2::facet_wrap(~ Type.M, labeller = labber) +
+      ggplot2::labs(
+        x = NULL, y = ylab,
+        title = paste0("MC mean (yellow) and ", ci_pct, "% CI (band) — storage & emission pools")
+      ) +
+      ggplot2::theme_bw(base_size = 14) +
+      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+    
+  } else if (plot.type == "2") {
+    ggplot2::ggplot(mc_total, ggplot2::aes(Year, Mean)) +
+      ggplot2::geom_ribbon(ggplot2::aes(ymin = lci, ymax = uci), fill = "grey85") +
+      ggplot2::geom_line(color = "yellow") +
+      ggplot2::labs(
+        x = NULL, y = ylab,
+        title = paste0("MC mean (yellow) and ", ci_pct, "% CI (band) — PIU + SWDS")
+      ) +
+      ggplot2::theme_bw(base_size = 14)
+    
+  } else { # "3" — convergence
+    end_yr <- if (!is.null(mc_total) && "Year" %in% names(mc_total)) tail(mc_total$Year, 1L) else NA
+    lab_map <- c(
+      mean   = "Mean",
+      se     = "Standard Error",
+      ciUCI  = paste0(ci_pct, "% CI, Upper"),
+      ciLCI  = paste0(ci_pct, "% CI, Lower")
+    )
+    mc_iters$facet.labs <- unname(lab_map[as.character(mc_iters$stat)])
+    mc_iters$facet.labs[is.na(mc_iters$facet.labs)] <- as.character(mc_iters$stat)
+    mc_iters$C <- mc_iters$C / 1e6
+    
+    ggplot2::ggplot(mc_iters, ggplot2::aes(iter, C)) +
+      ggplot2::geom_line() +
+      ggplot2::facet_wrap(~ facet.labs, scales = "free_y") +
+      ggplot2::labs(
+        x = "Iterations", y = ylab,
+        title = paste0("Convergence — PIU + SWDS", if (!is.na(end_yr)) paste0(", ", end_yr) else "",
+                       " (N = ", tryCatch(hwp$N.ITER, error = function(...) NA), ")")
+      ) +
+      ggplot2::theme_bw(base_size = 14)
   }
 }
 
-# 5) Monte Carlo Estimates — facet by pool (type 1)
-p6 <- plot_mc_estimates(hwp, plot.type=1, metrictype="TgC")
-print(p6); save_plot_png(p5, "Plot_MC_facet.png")
+
+
+
+# Use objects inside `hwp`
+p1 <- plot_mc_estimates(hwp, plot.type = "1", metrictype = "TgC")
+
+
+# Or pass explicitly (works even if the names differ in your object)
+p1 <- plot_mc_estimates(
+  hwp, plot.type = 1, metrictype = "TgC",
+  mc_plot  = hwp$mc_plot
+)
+
+p2 <- plot_mc_estimates(
+  hwp, plot.type = 2, metrictype = "CO2e",
+  mc_total = hwp$mc_PoolsTotalPlot
+)
+
+p3 <- plot_mc_estimates(
+  hwp, plot.type = 3, metrictype = "TgC",
+  mc_iters = hwp$mc_iter_results,
+  mc_total = hwp$mc_PoolsTotalPlot  # optional, just for the end-year in title
+)
 
 
 # ---------- simple file saver ----------
