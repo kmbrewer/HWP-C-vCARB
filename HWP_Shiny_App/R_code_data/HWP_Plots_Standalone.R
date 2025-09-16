@@ -290,6 +290,110 @@ out_2022_incExp <- print_hwp_stocks_2022_include_exports(hwp)
 
 
 
+# ================================
+# HWP cumulative summary 2001–2022
+# Requires in `hwp` (tons C):
+#   eu_array           [EndUseID, Owner, Year] (annual inflow by ownership)
+#   eec_array          [EndUseID, Owner, Year] (annual emissions w/ energy capture)
+#   ewoec_array        [EndUseID, Owner, Year] (annual emissions w/o energy capture)
+#   pu.final_array     [EndUseID, Owner, Year] (stock in products in use)
+#   swdsCtotal_array   [EndUseID, Owner, Year] (stock in SWDS)
+# Outputs in **MMT C** (use metric="CO2e" to convert)
+# ================================
+
+
+# --- small helpers ---
+.clean_names <- function(x) if (is.null(x)) character(0) else gsub("\\.", " ", trimws(x))
+.get_years <- function(hwp) {
+  y <- hwp$years
+  if (!is.null(y)) return(as.numeric(y))
+  for (nm in c("eu_array","eec_array","ewoec_array")) {
+    arr <- hwp[[nm]]
+    if (!is.null(arr)) {
+      yy <- suppressWarnings(as.numeric(dimnames(arr)[[3]]))
+      if (!all(is.na(yy))) return(yy)
+    }
+  }
+  stop("Could not determine years from `hwp`.")
+}
+
+# Pull a YEAR vector from the **Total** owner slice; if absent, fall back to
+# summing all owners (and warn once). Always returns MMT C.
+.series_from_total <- local({
+  warned <- FALSE
+  function(arr, label = "Total") {
+    if (is.null(arr)) stop("Required array is NULL.")
+    dn2 <- .clean_names(dimnames(arr)[[2]])
+    iT  <- which(dn2 == label)
+    if (length(iT)) {
+      as.numeric(apply(arr[, iT, , drop = FALSE], 3, sum, na.rm = TRUE)) / 1e6
+    } else {
+      if (!warned) {
+        warning("No 'Total' owner found; summing all owners as a fallback.")
+        warned <<- TRUE
+      }
+      as.numeric(apply(arr, 3, sum, na.rm = TRUE)) / 1e6
+    }
+  }
+})
+
+# -------- main function --------
+hwp_totals_from_total <- function(
+    hwp,
+    metric = c("MMTC","CO2e"),
+    year_from = 1904L,
+    year_to   = 2022L,
+    do_sanity_check = TRUE
+) {
+  metric <- match.arg(metric)
+  conv   <- if (metric == "CO2e") 44/12 else 1
+  
+  years <- .get_years(hwp)
+  rng   <- which(years >= year_from & years <= year_to)
+  if (!length(rng)) stop("No data in requested window.")
+  
+  # --- annual series from the **Total** slice only ---
+  inflow_ann <- .series_from_total(hwp$eu_array)          * conv
+  eec_ann    <- .series_from_total(hwp$eec_array)         * conv
+  ewoec_ann  <- .series_from_total(hwp$ewoec_array)       * conv
+  
+  # --- cumulative built from those same annual series ---
+  inflow_cum <- cumsum(inflow_ann)
+  eec_cum    <- cumsum(eec_ann)
+  ewoec_cum  <- cumsum(ewoec_ann)
+  
+  # --- optional identity checks on the window ---
+  if (isTRUE(do_sanity_check)) {
+    eps <- 1e-9
+    chk1 <- max(abs(diff(inflow_cum[rng]) - inflow_ann[rng][-1]), na.rm = TRUE)
+    chk2 <- max(abs(diff(eec_cum[rng])    - eec_ann[rng][-1]),    na.rm = TRUE)
+    chk3 <- max(abs(diff(ewoec_cum[rng])  - ewoec_ann[rng][-1]),  na.rm = TRUE)
+    if (any(c(chk1,chk2,chk3) > eps)) {
+      warning(sprintf("Sanity check failed: max deltas = inflow %.3e, EEC %.3e, EWOEC %.3e",
+                      chk1, chk2, chk3))
+    }
+  }
+  
+  data.frame(
+    Year                         = years[rng],
+    Inflow_Total                 = round(inflow_ann[rng], 3),
+    Cum_Inflow_Total             = round(inflow_cum[rng], 3),
+    Emitted_EnergyCap_Total      = round(eec_ann[rng], 3),
+    Cum_Emitted_EnergyCap        = round(eec_cum[rng], 3),
+    Emitted_NoEnergyCap_Total    = round(ewoec_ann[rng], 3),
+    Cum_Emitted_NoEnergyCap      = round(ewoec_cum[rng], 3),
+    check.names = FALSE
+  )
+}
+
+# -------- example usage --------
+# 2001–2022 in MMT C (change to metric="CO2e" if needed)
+tbl_total <- hwp_totals_from_total(hwp, metric = "MMTC", year_from = 2001, year_to = 2022)
+print(tbl_total, row.names = FALSE)
+
+
+
+
 
 
 # =========================================================
@@ -1784,6 +1888,161 @@ p_sd <- plot_cumulative_simple_decay(
   y_max =  900   # positive bound
 )
 print(p_sd)
+
+
+
+# === CUMULATIVE W/ TRENDLINE ===========
+# --- Libraries ---
+suppressWarnings(suppressMessages(require(ggplot2)))
+
+# --- Helpers (unchanged) ---
+.axis_pretty <- function(x, n = 6) {
+  x <- x[is.finite(x)]
+  if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
+  br <- pretty(range(x, na.rm = TRUE), n = n)
+  list(min = min(br), max = max(br), by = diff(br)[1])
+}
+.clean_names <- function(x) if (is.null(x)) character(0) else gsub("\\.", " ", trimws(x))
+
+.series_total_or_sum <- function(arr, exclude_exports = FALSE) {
+  stopifnot(!is.null(arr))
+  dn2  <- .clean_names(dimnames(arr)[[2]])
+  nOwn <- dim(arr)[2]
+  if (!length(dn2)) dn2 <- paste0("Owner", seq_len(nOwn))
+  idx_total   <- which(dn2 == "Total")
+  idx_exports <- which(dn2 == "Exports")
+  if (length(idx_total)) {
+    apply(arr[, idx_total, , drop = FALSE], 3, sum, na.rm = TRUE)
+  } else {
+    keep <- seq_len(nOwn)
+    if (exclude_exports && length(idx_exports)) keep <- setdiff(keep, idx_exports)
+    apply(arr[, keep, , drop = FALSE], 3, sum, na.rm = TRUE)
+  }
+}
+.get_years <- function(hwp) {
+  y <- hwp$years
+  if (!is.null(y)) return(as.numeric(y))
+  for (nm in c("eu_array", "pu.final_array", "swdsCtotal_array", "eec_array")) {
+    if (!is.null(hwp[[nm]])) {
+      yy <- suppressWarnings(as.numeric(dimnames(hwp[[nm]])[[3]]))
+      if (!all(is.na(yy))) return(yy)
+    }
+  }
+  stop("hwp$years is required or must be derivable from array dimnames[[3]].")
+}
+
+# =========================================================
+# Production approach (2001–2023 trendline + label, shifted left)
+# Args:
+#   metric: "MMTC" | "CO2e"
+#   include_total_line: overlay black total line
+#   add_trend: add linear trend for `trend_years` on Total
+#   trend_years: c(start,end) years for trend (default 2001–2023)
+#   y_min/y_max: optional fixed y-axis
+# =========================================================
+plot_cumulative_stocks_by_pool <- function(
+    hwp,
+    metric             = c("MMTC","CO2e"),
+    include_total_line = TRUE,
+    add_trend          = TRUE,
+    trend_years        = c(2001L, 2023L),
+    y_min = NA,
+    y_max = NA
+) {
+  metric <- match.arg(metric)
+  
+  years <- .get_years(hwp)
+  if (is.null(hwp$pu.final_array) || is.null(hwp$swdsCtotal_array)) {
+    stop("Production approach needs hwp$pu.final_array and hwp$swdsCtotal_array.")
+  }
+  
+  pu   <- .series_total_or_sum(hwp$pu.final_array)   / 1e6  # MMT C
+  swds <- .series_total_or_sum(hwp$swdsCtotal_array) / 1e6
+  df <- data.frame(Year = years, PIU = pu, SWDS = swds, Total = pu + swds)
+  
+  # Metric conversion
+  conv <- if (metric == "CO2e") 44/12 else 1
+  if (conv != 1) df[c("PIU","SWDS","Total")] <- lapply(df[c("PIU","SWDS","Total")], `*`, conv)
+  ylab  <- if (metric == "CO2e") expression("MMT CO"[2]*"e") else "MMT C"
+  yunit <- if (metric == "CO2e") "MMT CO2e" else "MMT C"
+  
+  # Axis
+  if (is.na(y_min) || is.na(y_max)) {
+    ax <- .axis_pretty(df$Total)
+    if (is.na(y_min)) y_min <- ax$min
+    if (is.na(y_max)) y_max <- ax$max
+  }
+  
+  long <- rbind(
+    data.frame(Year = df$Year, pool = "Products in Use",            Value = df$PIU),
+    data.frame(Year = df$Year, pool = "Solid Waste Disposal Sites", Value = df$SWDS)
+  )
+  
+  p <- ggplot2::ggplot(long, ggplot2::aes(Year, Value, fill = pool)) +
+    ggplot2::geom_area(color = "black", linewidth = 0.2, alpha = 0.95) +
+    ggplot2::scale_fill_manual(
+      values = c("Products in Use" = "#6F00A8", "Solid Waste Disposal Sites" = "#C6508F")
+    ) +
+    ggplot2::scale_y_continuous(limits = c(y_min, y_max), expand = c(0, 0)) +
+    ggplot2::labs(
+      x = "Year", y = ylab,
+      title = "Cumulative carbon stocks by pool — Production approach"
+    ) +
+    ggplot2::coord_cartesian(clip = "off") +
+    ggplot2::theme_bw(base_size = 14) +
+    ggplot2::theme(
+      legend.title = ggplot2::element_blank(),
+      plot.margin  = grid::unit(c(8, 20, 8, 8), "pt")  # add a bit of right margin
+    )
+  
+  if (isTRUE(include_total_line)) {
+    p <- p +
+      ggplot2::geom_line(
+        data = df, ggplot2::aes(Year, Total, color = "Total"),
+        linewidth = 0.8, inherit.aes = FALSE
+      ) +
+      ggplot2::scale_color_manual(values = c(Total = "black"), name = NULL)
+  }
+  
+  # ---- Trendline & annotation for 2001–2023 (or available overlap) ----
+  if (isTRUE(add_trend) && length(trend_years) == 2) {
+    y1 <- max(min(trend_years), min(df$Year, na.rm = TRUE))
+    y2 <- min(max(trend_years), max(df$Year, na.rm = TRUE))
+    df_fit <- subset(df, Year >= y1 & Year <= y2 & is.finite(Total))
+    
+    if (nrow(df_fit) >= 2) {
+      mdl   <- stats::lm(Total ~ Year, data = df_fit)
+      slope <- unname(coef(mdl)[["Year"]])     # units per year (MMT C or CO2e)
+      r2    <- summary(mdl)$r.squared
+      
+      # draw trendline for that window only
+      p <- p +
+        ggplot2::geom_smooth(
+          data = df_fit,
+          ggplot2::aes(Year, Total),
+          method = "lm", se = FALSE, color = "#D62728", linetype = "dashed",
+          linewidth = 0.9, inherit.aes = FALSE
+        )
+      
+      # annotate slope & R^2 — 2% in from left of the window, near the top
+      x_span <- max(1, y2 - y1)
+      x_anno <- y1 + 0.02 * x_span
+      y_anno <- y_max - 0.05 * (y_max - y_min)
+      signch <- ifelse(slope >= 0, "+", "")
+      lbl <- sprintf("Trend %d–%d: %s%.2f %s/yr  (R\u00B2 = %.3f)", y1, y2, signch, slope, yunit, r2)
+      
+      p <- p + ggplot2::annotate("text", x = x_anno, y = y_anno, label = lbl,
+                                 hjust = 0, vjust = 1, size = 4.2, color = "#D62728")
+    }
+  }
+  
+  p
+}
+
+# ---- Example usage ----
+p_prod <- plot_cumulative_stocks_by_pool(hwp, metric = "MMTC", include_total_line = TRUE)
+print(p_prod)
+
 
 
 
