@@ -328,18 +328,29 @@ out_2022_incExp <- print_hwp_stocks_2022_include_exports(hwp)
 #   Stock_Total, Stock_PIU, Stock_SWDS, Stock_Domestic, Stock_Imports,
 #   Cum_Inflow_Total, Cum_Emitted_EnergyCap, Cum_Emitted_NoEnergyCap
 # Units: MMT C (set metric="CO2e" in the cumulative helper if you want CO2e)
+# Behavior:
+#   - For all years < pre_class_year (default 1952), unclassified stock is
+#     assigned to Domestic: Stock_Domestic = Stock_Total - Stock_Imports (or Stock_Total if imports missing).
+#   - For years >= pre_class_year, the last pre-1952 Domestic stock is carried forward
+#     as a baseline and added to the classified Domestic so the series is continuous.
 # ================================
 
 hwp_report_table <- function(hwp,
                              year_from = 2001L,
                              year_to   = 2022L,
-                             metric_cum = c("MMTC","CO2e")) {
+                             metric_cum = c("MMTC","CO2e"),
+                             pre_class_year = 1952L,
+                             cap_dom_to_total = TRUE) {
   metric_cum <- match.arg(metric_cum)
   stopifnot(!is.null(hwp$pu.final_array), !is.null(hwp$swdsCtotal_array))
   pu_arr <- hwp$pu.final_array
   sw_arr <- hwp$swdsCtotal_array
   
-  # ---- years ----
+  # -------- small helpers --------
+  to_mmt <- function(x_tons) (if (length(x_tons)) x_tons else 0) / 1e6
+  nz0    <- function(x) { x[is.na(x) | !is.finite(x)] <- 0; x }  # NA/Inf -> 0
+  
+  # ---- resolve years ----
   get_years <- function(arr) {
     yrs <- NULL
     dn  <- dimnames(arr)
@@ -356,6 +367,7 @@ hwp_report_table <- function(hwp,
   rng   <- which(years >= year_from & years <= year_to)
   if (!length(rng)) stop("No years in requested window.")
   Y     <- years[rng]
+  nY    <- length(Y)
   
   # ---- owners ----
   owners <- trimws(if (!is.null(dimnames(pu_arr)[[2]])) dimnames(pu_arr)[[2]] else character())
@@ -366,7 +378,7 @@ hwp_report_table <- function(hwp,
   owners_no_total <- setdiff(owners, "Total")
   jDomestic <- which(owners %in% setdiff(owners_no_total, c("Imports","Exports")))
   
-  # ---- helpers (tons C -> MMT C) ----
+  # ---- helpers to sum (tons C) ----
   sum_overall_all_owners_at <- function(arr, k) {
     if (length(jT)) {
       sum(arr[, jT, k, drop = FALSE], na.rm = TRUE)
@@ -383,36 +395,54 @@ hwp_report_table <- function(hwp,
     sum(arr[, jset, k, drop = FALSE], na.rm = TRUE)
   }
   
-  # ---- stocks per year (PIU, SWDS, Total, Domestic, Imports) ----
-  nY <- length(Y)
-  stock_piu  <- numeric(nY)
-  stock_sw   <- numeric(nY)
-  stock_tot  <- numeric(nY)
-  stock_dom  <- rep(NA_real_, nY)
-  stock_imp  <- rep(NA_real_, nY)
+  # ---- compute core series (in MMT C) ----
+  stock_piu <- stock_sw <- stock_tot <- numeric(nY)
+  stock_imp <- rep(NA_real_, nY)   # imports
+  dom_class <- rep(NA_real_, nY)   # classified domestic (post-1952)
   
   for (i in seq_along(rng)) {
     k <- rng[i]
     pu_tot_tons <- sum_overall_all_owners_at(pu_arr, k)
     sw_tot_tons <- sum_overall_all_owners_at(sw_arr, k)
     
-    stock_piu[i] <- pu_tot_tons / 1e6
-    stock_sw[i]  <- sw_tot_tons / 1e6
-    stock_tot[i] <- (pu_tot_tons + sw_tot_tons) / 1e6
+    stock_piu[i] <- to_mmt(pu_tot_tons)
+    stock_sw[i]  <- to_mmt(sw_tot_tons)
+    stock_tot[i] <- to_mmt(pu_tot_tons + sw_tot_tons)
     
-    # Domestic (exclude Total/Imports/Exports)
-    pu_dom_tons <- sum_owner_set_at(pu_arr, jDomestic, k)
-    sw_dom_tons <- sum_owner_set_at(sw_arr, jDomestic, k)
-    if (!is.na(pu_dom_tons) && !is.na(sw_dom_tons)) {
-      stock_dom[i] <- (pu_dom_tons + sw_dom_tons) / 1e6
-    }
+    # imports (may be NA if no owner slice)
+    imp_tons <- sum(c(sum_owner_at(pu_arr, jImports, k),
+                      sum_owner_at(sw_arr, jImports, k)), na.rm = TRUE)
+    stock_imp[i] <- if (is.finite(imp_tons)) to_mmt(imp_tons) else NA_real_
     
-    # Imports
-    pu_imp_tons <- sum_owner_at(pu_arr, jImports, k)
-    sw_imp_tons <- sum_owner_at(sw_arr, jImports, k)
-    if (!is.na(pu_imp_tons) && !is.na(sw_imp_tons)) {
-      stock_imp[i] <- (pu_imp_tons + sw_imp_tons) / 1e6
-    }
+    # classified domestic (excl Total/Imports/Exports) — NA in early years
+    dom_tons <- sum(c(sum_owner_set_at(pu_arr, jDomestic, k),
+                      sum_owner_set_at(sw_arr, jDomestic, k)), na.rm = TRUE)
+    dom_class[i] <- if (is.finite(dom_tons) && dom_tons != 0) to_mmt(dom_tons) else NA_real_
+  }
+  
+  # ---- build Domestic with pre-1952 baseline carried forward ----
+  is_pre  <- Y < pre_class_year
+  is_post <- !is_pre
+  
+  # pre: Domestic = Total - Imports (imports default 0)
+  pre_dom <- nz0(stock_tot) - nz0(stock_imp)
+  pre_dom[!is_pre] <- NA_real_
+  
+  # baseline = last non-NA pre-1952 Domestic
+  last_pre_idx <- tail(which(is_pre & is.finite(pre_dom)), 1)
+  baseline <- if (length(last_pre_idx)) pre_dom[last_pre_idx] else 0
+  
+  # post: Domestic = classified_dom (NA->0) + baseline
+  post_dom <- nz0(dom_class) + baseline
+  post_dom[!is_post] <- NA_real_
+  
+  # final Domestic
+  stock_dom <- ifelse(is_pre, nz0(pre_dom), nz0(post_dom))
+  
+  # guards
+  stock_dom[stock_dom < 0 | !is.finite(stock_dom)] <- 0
+  if (isTRUE(cap_dom_to_total)) {
+    stock_dom <- pmin(stock_dom, stock_tot)
   }
   
   # ---- cumulative series using your helper (aligned to Y) ----
@@ -432,7 +462,7 @@ hwp_report_table <- function(hwp,
     Stock_PIU                  = round(stock_piu, 3),
     Stock_SWDS                 = round(stock_sw, 3),
     Stock_Domestic             = round(stock_dom, 3),
-    Stock_Imports              = round(stock_imp, 3),
+    Stock_Imports              = round(nz0(stock_imp), 3),
     Cum_Inflow_Total           = cum_tbl$Cum_Inflow_Total,
     Cum_Emitted_EnergyCap      = cum_tbl$Cum_Emitted_EnergyCap,
     Cum_Emitted_NoEnergyCap    = cum_tbl$Cum_Emitted_NoEnergyCap,
@@ -443,7 +473,7 @@ hwp_report_table <- function(hwp,
   invisible(out)
 }
 
-# -------- Example: print 2001–2022 in MMT C --------
+# Example
 tbl_report <- hwp_report_table(hwp, year_from = 1904, year_to = 2022, metric_cum = "MMTC")
 
 
