@@ -135,18 +135,12 @@ hwp <- make_hwp(model.outputs)
 
 
 # =========================================================
-# HWP stocks for 2022 — INCLUDING Exports
-# Reports:
-#   • Overall total (all ownerships, incl. Exports)
-#   • By Ownership (incl. Exports; excludes the "Total" column)
-#   • By Product Category (sum over all ownerships incl. Exports)
-#
-# Requires in `hwp`:
-#   pu.final_array     [EndUseID, Owner, Year]  (tons C)
-#   swdsCtotal_array   [EndUseID, Owner, Year]  (tons C)
-# Outputs in MMT C
+# HWP stocks for YEAR — INCLUDING Exports
+# Adds overall report line with:
+#   Stock_Total, Stock_PIU, Stock_SWDS, Stock_Domestic, Stock_Imports,
+#   Cum_Inflow_Total, Cum_Emitted_EnergyCap, Cum_Emitted_NoEnergyCap
 # =========================================================
-print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2000L) {
+print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2022L) {
   stopifnot(!is.null(hwp$pu.final_array), !is.null(hwp$swdsCtotal_array))
   pu_arr <- hwp$pu.final_array
   sw_arr <- hwp$swdsCtotal_array
@@ -172,8 +166,10 @@ print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2000L) {
   owners <- trimws(if (!is.null(dimnames(pu_arr)[[2]])) dimnames(pu_arr)[[2]] else character())
   if (!length(owners)) stop("Owner dimension names are required on arrays.")
   
-  jT <- which(owners == "Total")      # optional "Total" column
-  owners_no_total <- setdiff(owners, "Total")  # include Exports here if present
+  jT       <- which(owners == "Total")               # optional "Total" column
+  jImports <- which(owners == "Imports")
+  jExports <- which(owners == "Exports")
+  owners_no_total <- setdiff(owners, "Total")
   
   # -------- helpers --------
   sum_overall_all_owners <- function(arr) {
@@ -187,16 +183,52 @@ print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2000L) {
     if (!length(j)) return(NA_real_)
     sum(arr[, j, yidx, drop = FALSE], na.rm = TRUE)
   }
+  sum_owner_set <- function(arr, jset) {
+    if (!length(jset)) return(NA_real_)
+    sum(arr[, jset, yidx, drop = FALSE], na.rm = TRUE)
+  }
   
   # -------- Overall (ALL ownerships, incl. Exports) --------
   pu_overall  <- sum_overall_all_owners(pu_arr) / 1e6
   sw_overall  <- sum_overall_all_owners(sw_arr) / 1e6
   tot_overall <- pu_overall + sw_overall
-  df_overall <- data.frame(
-    Year        = year_target,
-    PIU_MMT_C   = round(pu_overall, 3),
-    SWDS_MMT_C  = round(sw_overall, 3),
-    Total_MMT_C = round(tot_overall, 3),
+  
+  # -------- Domestic vs Imports stocks --------
+  # Domestic := all owners EXCEPT "Imports" and "Total" (and exclude "Exports" if present)
+  jDomestic <- which(owners %in% setdiff(owners_no_total, c("Imports", "Exports")))
+  pu_dom <- sum_owner_set(pu_arr, jDomestic) / 1e6
+  sw_dom <- sum_owner_set(sw_arr, jDomestic) / 1e6
+  stock_domestic <- if (is.na(pu_dom) || is.na(sw_dom)) NA_real_ else pu_dom + sw_dom
+  
+  pu_imp <- sum_owner(pu_arr, jImports) / 1e6
+  sw_imp <- sum_owner(sw_arr, jImports) / 1e6
+  stock_imports <- if (is.na(pu_imp) || is.na(sw_imp)) NA_real_ else pu_imp + sw_imp
+  
+  # -------- Pull cumulative (2001..year_target) from your existing helper --------
+  cum_tbl <- hwp_totals_from_total(
+    hwp,
+    metric    = "MMTC",
+    year_from = min(2001L, min(years, na.rm = TRUE)),
+    year_to   = year_target,
+    do_sanity_check = FALSE
+  )
+  cum_row <- cum_tbl[cum_tbl$Year == year_target, ]
+  if (!nrow(cum_row)) stop("No cumulative row found for requested year.")
+  
+  # -------- Overall line with requested fields --------
+  # Fields requested:
+  # Stock_Total, Stock_PIU, Stock_SWDS, Stock_Domestic, Stock_Imports,
+  # Cum_Inflow_Total, Cum_Emitted_EnergyCap, Cum_Emitted_NoEnergyCap
+  df_report <- data.frame(
+    Year                      = year_target,
+    Stock_Total               = round(tot_overall, 3),
+    Stock_PIU                 = round(pu_overall, 3),
+    Stock_SWDS                = round(sw_overall, 3),
+    Stock_Domestic            = round(stock_domestic, 3),
+    Stock_Imports             = round(stock_imports, 3),
+    Cum_Inflow_Total          = cum_row$Cum_Inflow_Total,
+    Cum_Emitted_EnergyCap     = cum_row$Cum_Emitted_EnergyCap,
+    Cum_Emitted_NoEnergyCap   = cum_row$Cum_Emitted_NoEnergyCap,
     check.names = FALSE
   )
   
@@ -216,7 +248,7 @@ print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2000L) {
   }))
   rownames(df_owners) <- NULL
   
-  # -------- By Product Category (sum over ALL ownerships incl. Exports; exclude "Total" column) --------
+  # -------- By Product Category (sum over ALL ownerships incl. Exports; exclude "Total") --------
   n_ids <- dim(pu_arr)[1]
   cat_map <- list(
     "Fuel" = c(1,48,95,142,197),
@@ -264,8 +296,8 @@ print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2000L) {
   # -------- Print results --------
   cat("=== HWP Carbon Stocks (MMT C) — Year", year_target, "(including Exports) ===\n\n")
   
-  cat("[Overall — All ownerships]\n")
-  print(df_overall, row.names = FALSE)
+  cat("[Overall — requested report fields]\n")
+  print(df_report, row.names = FALSE)
   
   cat("\n[By Ownership — including Exports (excludes 'Total' column)]\n")
   print(df_owners, row.names = FALSE)
@@ -274,7 +306,7 @@ print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2000L) {
   print(df_cats, row.names = FALSE)
   
   invisible(list(
-    overall_all_ownerships = df_overall,
+    report_line            = df_report,
     by_ownership_incl_exp  = df_owners,
     by_category_incl_exp   = df_cats
   ))
@@ -283,113 +315,136 @@ print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2000L) {
 # ---- Example call (prints 2022 with Exports included) ----
 out_2022_incExp <- print_hwp_stocks_2022_include_exports(hwp)
 
-# # Optional CSVs:
-# write.csv(out_2022_incExp$overall_all_ownerships, "HWP_overall_2022_allOwnerships_inclExports.csv", row.names = FALSE)
-# write.csv(out_2022_incExp$by_ownership_incl_exp,  "HWP_byOwnership_2022_inclExports.csv",          row.names = FALSE)
-# write.csv(out_2022_incExp$by_category_incl_exp,   "HWP_byCategory_2022_inclExports.csv",           row.names = FALSE)
+# Optional CSVs:
+# write.csv(out_2022_incExp$report_line,           "HWP_reportline_2022.csv", row.names = FALSE)
+# write.csv(out_2022_incExp$by_ownership_incl_exp, "HWP_byOwnership_2022_inclExports.csv", row.names = FALSE)
+# write.csv(out_2022_incExp$by_category_incl_exp,  "HWP_byCategory_2022_inclExports.csv", row.names = FALSE)
 
 
 
 # ================================
-# HWP cumulative summary 2001–2022
-# Requires in `hwp` (tons C):
-#   eu_array           [EndUseID, Owner, Year] (annual inflow by ownership)
-#   eec_array          [EndUseID, Owner, Year] (annual emissions w/ energy capture)
-#   ewoec_array        [EndUseID, Owner, Year] (annual emissions w/o energy capture)
-#   pu.final_array     [EndUseID, Owner, Year] (stock in products in use)
-#   swdsCtotal_array   [EndUseID, Owner, Year] (stock in SWDS)
-# Outputs in **MMT C** (use metric="CO2e" to convert)
+# One-row report for a target year
+# Fields:
+#   Stock_Total, Stock_PIU, Stock_SWDS, Stock_Domestic, Stock_Imports,
+#   Cum_Inflow_Total, Cum_Emitted_EnergyCap, Cum_Emitted_NoEnergyCap
+# Units: MMT C (set metric="CO2e" in the cumulative helper if you want CO2e)
 # ================================
 
-
-# --- small helpers ---
-.clean_names <- function(x) if (is.null(x)) character(0) else gsub("\\.", " ", trimws(x))
-.get_years <- function(hwp) {
-  y <- hwp$years
-  if (!is.null(y)) return(as.numeric(y))
-  for (nm in c("eu_array","eec_array","ewoec_array")) {
-    arr <- hwp[[nm]]
-    if (!is.null(arr)) {
-      yy <- suppressWarnings(as.numeric(dimnames(arr)[[3]]))
-      if (!all(is.na(yy))) return(yy)
-    }
-  }
-  stop("Could not determine years from `hwp`.")
-}
-
-# Pull a YEAR vector from the **Total** owner slice; if absent, fall back to
-# summing all owners (and warn once). Always returns MMT C.
-.series_from_total <- local({
-  warned <- FALSE
-  function(arr, label = "Total") {
-    if (is.null(arr)) stop("Required array is NULL.")
-    dn2 <- .clean_names(dimnames(arr)[[2]])
-    iT  <- which(dn2 == label)
-    if (length(iT)) {
-      as.numeric(apply(arr[, iT, , drop = FALSE], 3, sum, na.rm = TRUE)) / 1e6
-    } else {
-      if (!warned) {
-        warning("No 'Total' owner found; summing all owners as a fallback.")
-        warned <<- TRUE
-      }
-      as.numeric(apply(arr, 3, sum, na.rm = TRUE)) / 1e6
-    }
-  }
-})
-
-# -------- main function --------
-hwp_totals_from_total <- function(
-    hwp,
-    metric = c("MMTC","CO2e"),
-    year_from = 1904L,
-    year_to   = 2022L,
-    do_sanity_check = TRUE
-) {
-  metric <- match.arg(metric)
-  conv   <- if (metric == "CO2e") 44/12 else 1
+hwp_report_table <- function(hwp,
+                             year_from = 2001L,
+                             year_to   = 2022L,
+                             metric_cum = c("MMTC","CO2e")) {
+  metric_cum <- match.arg(metric_cum)
+  stopifnot(!is.null(hwp$pu.final_array), !is.null(hwp$swdsCtotal_array))
+  pu_arr <- hwp$pu.final_array
+  sw_arr <- hwp$swdsCtotal_array
   
-  years <- .get_years(hwp)
+  # ---- years ----
+  get_years <- function(arr) {
+    yrs <- NULL
+    dn  <- dimnames(arr)
+    if (!is.null(dn) && length(dn) >= 3 && !is.null(dn[[3]])) {
+      cand <- suppressWarnings(as.numeric(dn[[3]]))
+      if (length(cand) == dim(arr)[3] && !all(is.na(cand))) yrs <- cand
+    }
+    if (is.null(yrs) && !is.null(hwp$years)) yrs <- suppressWarnings(as.numeric(hwp$years))
+    if (is.null(yrs) && !is.null(hwp$Years))  yrs <- suppressWarnings(as.numeric(hwp$Years))
+    if (is.null(yrs)) yrs <- seq_len(dim(arr)[3])
+    yrs
+  }
+  years <- get_years(pu_arr)
   rng   <- which(years >= year_from & years <= year_to)
-  if (!length(rng)) stop("No data in requested window.")
+  if (!length(rng)) stop("No years in requested window.")
+  Y     <- years[rng]
   
-  # --- annual series from the **Total** slice only ---
-  inflow_ann <- .series_from_total(hwp$eu_array)          * conv
-  eec_ann    <- .series_from_total(hwp$eec_array)         * conv
-  ewoec_ann  <- .series_from_total(hwp$ewoec_array)       * conv
+  # ---- owners ----
+  owners <- trimws(if (!is.null(dimnames(pu_arr)[[2]])) dimnames(pu_arr)[[2]] else character())
+  if (!length(owners)) stop("Owner dimension names are required on arrays.")
+  jT        <- which(owners == "Total")
+  jImports  <- which(owners == "Imports")
+  jExports  <- which(owners == "Exports")
+  owners_no_total <- setdiff(owners, "Total")
+  jDomestic <- which(owners %in% setdiff(owners_no_total, c("Imports","Exports")))
   
-  # --- cumulative built from those same annual series ---
-  inflow_cum <- cumsum(inflow_ann)
-  eec_cum    <- cumsum(eec_ann)
-  ewoec_cum  <- cumsum(ewoec_ann)
+  # ---- helpers (tons C -> MMT C) ----
+  sum_overall_all_owners_at <- function(arr, k) {
+    if (length(jT)) {
+      sum(arr[, jT, k, drop = FALSE], na.rm = TRUE)
+    } else {
+      sum(arr[, owners_no_total, k, drop = FALSE], na.rm = TRUE)
+    }
+  }
+  sum_owner_at <- function(arr, j, k) {
+    if (!length(j)) return(NA_real_)
+    sum(arr[, j, k, drop = FALSE], na.rm = TRUE)
+  }
+  sum_owner_set_at <- function(arr, jset, k) {
+    if (!length(jset)) return(NA_real_)
+    sum(arr[, jset, k, drop = FALSE], na.rm = TRUE)
+  }
   
-  # --- optional identity checks on the window ---
-  if (isTRUE(do_sanity_check)) {
-    eps <- 1e-9
-    chk1 <- max(abs(diff(inflow_cum[rng]) - inflow_ann[rng][-1]), na.rm = TRUE)
-    chk2 <- max(abs(diff(eec_cum[rng])    - eec_ann[rng][-1]),    na.rm = TRUE)
-    chk3 <- max(abs(diff(ewoec_cum[rng])  - ewoec_ann[rng][-1]),  na.rm = TRUE)
-    if (any(c(chk1,chk2,chk3) > eps)) {
-      warning(sprintf("Sanity check failed: max deltas = inflow %.3e, EEC %.3e, EWOEC %.3e",
-                      chk1, chk2, chk3))
+  # ---- stocks per year (PIU, SWDS, Total, Domestic, Imports) ----
+  nY <- length(Y)
+  stock_piu  <- numeric(nY)
+  stock_sw   <- numeric(nY)
+  stock_tot  <- numeric(nY)
+  stock_dom  <- rep(NA_real_, nY)
+  stock_imp  <- rep(NA_real_, nY)
+  
+  for (i in seq_along(rng)) {
+    k <- rng[i]
+    pu_tot_tons <- sum_overall_all_owners_at(pu_arr, k)
+    sw_tot_tons <- sum_overall_all_owners_at(sw_arr, k)
+    
+    stock_piu[i] <- pu_tot_tons / 1e6
+    stock_sw[i]  <- sw_tot_tons / 1e6
+    stock_tot[i] <- (pu_tot_tons + sw_tot_tons) / 1e6
+    
+    # Domestic (exclude Total/Imports/Exports)
+    pu_dom_tons <- sum_owner_set_at(pu_arr, jDomestic, k)
+    sw_dom_tons <- sum_owner_set_at(sw_arr, jDomestic, k)
+    if (!is.na(pu_dom_tons) && !is.na(sw_dom_tons)) {
+      stock_dom[i] <- (pu_dom_tons + sw_dom_tons) / 1e6
+    }
+    
+    # Imports
+    pu_imp_tons <- sum_owner_at(pu_arr, jImports, k)
+    sw_imp_tons <- sum_owner_at(sw_arr, jImports, k)
+    if (!is.na(pu_imp_tons) && !is.na(sw_imp_tons)) {
+      stock_imp[i] <- (pu_imp_tons + sw_imp_tons) / 1e6
     }
   }
   
-  data.frame(
-    Year                         = years[rng],
-    Inflow_Total                 = round(inflow_ann[rng], 3),
-    Cum_Inflow_Total             = round(inflow_cum[rng], 3),
-    Emitted_EnergyCap_Total      = round(eec_ann[rng], 3),
-    Cum_Emitted_EnergyCap        = round(eec_cum[rng], 3),
-    Emitted_NoEnergyCap_Total    = round(ewoec_ann[rng], 3),
-    Cum_Emitted_NoEnergyCap      = round(ewoec_cum[rng], 3),
+  # ---- cumulative series using your helper (aligned to Y) ----
+  cum_tbl <- hwp_totals_from_total(
+    hwp,
+    metric = metric_cum,     # "MMTC" or "CO2e"
+    year_from = min(Y),
+    year_to   = max(Y),
+    do_sanity_check = FALSE
+  )
+  cum_tbl <- cum_tbl[cum_tbl$Year %in% Y, ]
+  
+  # ---- assemble final table ----
+  out <- data.frame(
+    Year                       = Y,
+    Stock_Total                = round(stock_tot, 3),
+    Stock_PIU                  = round(stock_piu, 3),
+    Stock_SWDS                 = round(stock_sw, 3),
+    Stock_Domestic             = round(stock_dom, 3),
+    Stock_Imports              = round(stock_imp, 3),
+    Cum_Inflow_Total           = cum_tbl$Cum_Inflow_Total,
+    Cum_Emitted_EnergyCap      = cum_tbl$Cum_Emitted_EnergyCap,
+    Cum_Emitted_NoEnergyCap    = cum_tbl$Cum_Emitted_NoEnergyCap,
     check.names = FALSE
   )
+  
+  print(out, row.names = FALSE)
+  invisible(out)
 }
 
-# -------- example usage --------
-# 2001–2022 in MMT C (change to metric="CO2e" if needed)
-tbl_total <- hwp_totals_from_total(hwp, metric = "MMTC", year_from = 2001, year_to = 2022)
-print(tbl_total, row.names = FALSE)
+# -------- Example: print 2001–2022 in MMT C --------
+tbl_report <- hwp_report_table(hwp, year_from = 1904, year_to = 2022, metric_cum = "MMTC")
 
 
 
@@ -597,7 +652,7 @@ plot_ann_timber_by_enduse_bins <- function(
     summary = c("annual","cumulative"),
     mode    = c("category_total","category","total"),
     keep_exports = TRUE,
-    transparent_before = 2001L
+    transparent_before = 1965L
 ) {
   metric  <- match.arg(metric); summary <- match.arg(summary); mode <- match.arg(mode)
   
@@ -979,7 +1034,7 @@ plot_ann_timber_harvest <- function(hwp,
 # Plot call
 p1 <- plot_ann_timber_harvest(hwp,
                               metric="MMTC", summary="annual", mode="ownership_total",
-                              ownership_start_year=1952, trade_start_year=2001)
+                              ownership_start_year=1952, trade_start_year=1965)
 print(p1); save_plot_png(p1, "Plot_AnnHarvestandTrade.png")
 
 
@@ -1149,7 +1204,7 @@ plot_annual_net_change <- function(
     approach   = c("production","simple_decay"),
     metrictype = c("MMTC","CO2e"),
     include_net_line = TRUE,
-    transparent_before = 2001L
+    transparent_before = 1965L
 ) {
   approach   <- match.arg(approach)
   metrictype <- match.arg(metrictype)
@@ -1884,8 +1939,8 @@ p_sd <- plot_cumulative_simple_decay(
   hwp,
   metric = "MMTC",
   include_net_line = TRUE,
-  y_min = -500,  # negative bound
-  y_max =  900   # positive bound
+  y_min = -700,  # negative bound
+  y_max =  1350   # positive bound
 )
 print(p_sd)
 

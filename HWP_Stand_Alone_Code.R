@@ -50,7 +50,7 @@ QSANKEY.YEARS.OF.DECAY <- 3    # Set to any number between 3 and 100.
 ### Folder locations
 SHINY.CODE <- "HWP_Shiny_App/R_code_data/"              # Code chunks that both Shiny and the stand-alone model depend upon. They are stored in the Shiny app folder.
 IMPORT.DATA.FOLDER <- "HWP Data/ExistingData/"
-IMPORT.DATA.FILE <- "CA_Inputs_HWP_Model.xlsx"    # Change this to select other files from the "HWP Data" folder.
+IMPORT.DATA.FILE <- "CA_Inputs_HWP_Model_StockChangeApproach.xlsx"    # Change this to select other files from the "HWP Data" folder.
 ## Stock option (from CalFIRE) #IMPORT.DATA.FILE <- "CA_Inputs_HWP_Model (2).xlsx"    # Change this to select other files from the "HWP Data" folder.
 QAQC.FOLDER <- "HWP_Stand_Alone_Files/QAQC_Reports/"
 SA.CODE <- "HWP_Stand_Alone_Files/Standalone_R_files/"   # Stand-alone HWP model code
@@ -336,26 +336,3 @@ if (GENERATE.SANKEY == TRUE) {
 
 sum(model.outputs$eu_array[, which(ownership.names == "Exports"), ])
 sum(model.outputs$eu_array[, which(ownership.names == "Imports"), ])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
