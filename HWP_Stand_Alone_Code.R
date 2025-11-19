@@ -336,3 +336,33 @@ if (GENERATE.SANKEY == TRUE) {
 
 sum(model.outputs$eu_array[, which(ownership.names == "Exports"), ])
 sum(model.outputs$eu_array[, which(ownership.names == "Imports"), ])
+
+
+
+##### QA/QC Checks
+owners <- dimnames(hwp$eu_array)[[2]]
+owners
+
+
+low <- tolower(trimws(owners))
+jExp <- which(grepl("export", low))
+jExp
+
+# If jExp is empty or sums to ~0:
+apply(hwp$eu_array[, jExp, , drop = FALSE], 3, sum)
+
+
+# 1. What ownerships do we actually have in eu_array?
+owners <- dimnames(hwp$eu_array)[[2]]
+owners
+
+# 2. Any ownership that looks like exports?
+grep("exp", owners, ignore.case = TRUE, value = TRUE)
+
+# 3. Check if any export-like ownership has non-zero flows
+eu_arr <- hwp$eu_array
+owner_sums <- apply(eu_arr, 2, function(x) sum(x, na.rm = TRUE))
+owner_sums
+
+owner_sums[grep("exp", names(owner_sums), ignore.case = TRUE)]
+
