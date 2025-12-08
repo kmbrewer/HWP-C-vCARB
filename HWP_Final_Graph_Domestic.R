@@ -183,6 +183,127 @@ print(p)
 
 
 
+### JUST CARBON INPUT AND CARBON LOSSES
+
+# ---- Theme ----
+common_theme <- theme_bw(base_size = 14) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(size = 38),
+    axis.text  = element_text(size = 30),
+    panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.6),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "top",
+    legend.justification = "center",
+    legend.box.just = "center",
+    legend.box = "vertical",         # two-row legends (if needed in future)
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 30),
+    legend.key.size = unit(22, "pt"),
+    legend.key.width = unit(25, "pt"),
+    legend.box.margin = margin(8, 10, 0, 10),
+    legend.spacing.x = unit(14, "pt"),
+    plot.margin = margin(22, 18, 10, 14)
+  )
+
+# ---- File path & data ----
+path_xlsx <- "C:/Users/kbrewer/OneDrive - California Air Resources Board/Biomass_MAIN/Biomass Modelling/HWP-C-vR/HWP Data/ExistingData/CA_Inputs_HWP_Model_Graph.xlsx"
+
+# Only keep the columns needed for the three bar components
+required_cols <- c("Year", "Domestic_Inflow", "Domestic_C_Emitted_CO2", "Domestic_C_Emitted_CH4")
+
+pick <- NULL
+for (sh in readxl::excel_sheets(path_xlsx)) {
+  df_try <- suppressMessages(readxl::read_excel(path_xlsx, sheet = sh))
+  if (all(required_cols %in% names(df_try))) { 
+    pick <- sh
+    break 
+  }
+}
+stopifnot(!is.null(pick))
+
+raw <- readxl::read_excel(path_xlsx, sheet = pick)
+
+dat <- raw %>%
+  dplyr::select(dplyr::all_of(required_cols)) %>%
+  dplyr::mutate(
+    dplyr::across(-Year, as.numeric),
+    Year = as.integer(Year)
+  )
+
+# Prepare bar data: inputs positive, losses plotted as negative
+bars <- dat %>%
+  tidyr::pivot_longer(
+    c(Domestic_Inflow, Domestic_C_Emitted_CO2, Domestic_C_Emitted_CH4),
+    names_to  = "Component",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    value_plot = ifelse(Component == "Domestic_Inflow", value, -value),
+    Component = factor(
+      Component,
+      levels = c("Domestic_Inflow", "Domestic_C_Emitted_CO2", "Domestic_C_Emitted_CH4"),
+      labels = c("Carbon Stock Input", "Carbon Stock Loss (as CO2)", "Carbon Stock Loss (as CH4)")
+    )
+  )
+
+# ---- Beige→Brown palette (for bars only) ----
+col_tan      <- "#D2B48C"  # Carbon Stock Input
+col_bronze   <- "#B67C45"  # Carbon Stock Loss (as CO2)
+col_saddle   <- "#8B4513"  # Carbon Stock Loss (as CH4)
+
+# ---- Axes scaling ----
+y_all   <- range(bars$value_plot, na.rm = TRUE)
+pad_y   <- 0.15 * max(abs(y_all))
+ylim_y  <- c(y_all[1] - pad_y, y_all[2] + pad_y)
+
+xr       <- range(dat$Year, na.rm = TRUE)
+x_limits <- xr + c(-0.6, 0.6)
+
+# X-axis decade breaks
+x_breaks_all <- seq(1910, 2020, by = 10)
+x_breaks     <- x_breaks_all[x_breaks_all >= x_limits[1] & x_breaks_all <= x_limits[2]]
+
+# ---- Plot ----
+p <- ggplot() +
+  geom_col(
+    data  = bars,
+    aes(x = Year, y = value_plot, fill = Component),
+    width = 0.8,
+    alpha = 0.95
+  ) +
+  scale_fill_manual(values = c(
+    "Carbon Stock Input"           = col_tan,
+    "Carbon Stock Loss (as CO2)"   = col_bronze,
+    "Carbon Stock Loss (as CH4)"   = col_saddle
+  )) +
+  scale_x_continuous(
+    limits = x_limits,
+    breaks = x_breaks,
+    expand = expansion(mult = 0.01)
+  ) +
+  scale_y_continuous(
+    limits = ylim_y,
+    expand = expansion(mult = 0.01),
+    name   = "HWP Carbon Flow\n(MMT C)"
+  ) +
+  labs(
+    x     = "Year",
+    title = "Annual HWP Carbon Inputs and Losses"
+  ) +
+  guides(
+    fill = guide_legend(order = 1, nrow = 1)
+  ) +
+  common_theme +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    color       = NA,     # no line legends
+    linetype    = NA
+  )
+
+print(p)
+
 
 
 

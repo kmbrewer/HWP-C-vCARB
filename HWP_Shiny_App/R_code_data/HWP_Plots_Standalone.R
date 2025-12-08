@@ -1,17 +1,19 @@
 # HWP_Plots_Standalone.R
 
-install.packages("ggpattern")
+# (optional) install.packages("ggpattern")
 
 library(ggplot2)
 library(dplyr)
 library(tidyr)
 library(viridisLite)
 library(abind)
-library(reshape2) 
+library(reshape2)
 library(ggpattern)
 library(scales)
 library(tidyselect)
+library(grid)
 
+`%||%` <- function(a,b) if (is.null(a)) b else a
 
 # ---- Build hwp from model.outputs -------------------------------------------
 make_hwp <- function(model.outputs) {
@@ -70,7 +72,6 @@ make_hwp <- function(model.outputs) {
     if (length(dim(arr)) != 3) {
       stop(name, " must be 3D like eu_array; got dim = ", paste(dim(arr), collapse="x"))
     }
-    # check core dims match (EndUse x Ownership x Year)
     d_eu <- dim(hwp$eu_array); d_a <- dim(arr)
     if (!all(d_a == d_eu)) {
       stop(name, " dims ", paste(d_a, collapse="x"),
@@ -95,9 +96,7 @@ make_hwp <- function(model.outputs) {
     if (!("Year" %in% names(hwp$harv.hwp))) {
       hwp$harv.hwp$Year <- as.numeric(dimnames(hwp$eu_array)[[3]])
     }
-    # leave "Total" alone (BBF only used if you ask for BBF plots)
   }
-  
   hwp
 }
 
@@ -111,41 +110,252 @@ hwp <- make_hwp(model.outputs)
   if (positive_only) rng[1] <- 0
   span <- diff(rng)
   if (span == 0) span <- abs(rng[2]) %||% 1
-  # choose ~6 breaks
   by <- signif(span / 6, 1)
   list(min = if (positive_only) 0 else floor(rng[1]/by)*by,
        max = ceiling(rng[2]/by)*by,
        by = by)
 }
-`%||%` <- function(a,b) if (is.null(a)) b else a
-
-.get_years <- function(hwp) {
-  as.numeric(dimnames(hwp$eu_array)[[3]])
-}
-.get_ownerships <- function(hwp) {
-  dimnames(hwp$eu_array)[[2]]
-}
-.idx_total <- function(hwp) {
+.get_years       <- function(hwp) as.numeric(dimnames(hwp$eu_array)[[3]])
+.get_ownerships  <- function(hwp) dimnames(hwp$eu_array)[[2]]
+.idx_total       <- function(hwp) {
   owns <- .get_ownerships(hwp)
-  if ("Total" %in% owns) which(owns=="Total") else length(owns) # fallback to last
+  if ("Total" %in% owns) which(owns=="Total") else length(owns) # fallback
 }
 .as_co2e <- function(v, metrictype) if (metrictype=="CO2e") v * (44/12) else v
 .lab_co2e <- function(metrictype) if (metrictype=="CO2e") expression("Tg C"*O[2]*e) else "Tg C"
 
-
+# =========================================================
+# Domestic stock from totals helper (MMT C)
+# mode = "A" => Domestic = Total - Imports
+# mode = "B" => Domestic = Total - Imports - Exports (if an export stock exists)
+# =========================================================
+dom_from_totals_at <- function(hwp, k, mode = c("A","B")) {
+  mode <- match.arg(mode)
+  pu_arr <- hwp$pu.final_array
+  sw_arr <- hwp$swdsCtotal_array
+  owners <- trimws(dimnames(pu_arr)[[2]])
+  low    <- tolower(owners)
+  s <- function(arr, mask) if (any(mask)) sum(arr[, mask, k, drop = FALSE], na.rm = TRUE) else 0
+  mask_total   <- (low == "total")
+  mask_imports <- (low == "imports")
+  mask_exports <- (low == "exports")
+  
+  total_t   <- s(pu_arr, mask_total)   + s(sw_arr, mask_total)
+  imports_t <- s(pu_arr, mask_imports) + s(sw_arr, mask_imports)
+  exports_t <- s(pu_arr, mask_exports) + s(sw_arr, mask_exports)
+  
+  if (mode == "A") {
+    dom_tons <- total_t - imports_t
+  } else {
+    dom_tons <- total_t - imports_t - exports_t
+  }
+  max(dom_tons, 0) / 1e6
+}
 
 # =========================================================
-# HWP stocks for YEAR — INCLUDING Exports
-# Adds overall report line with:
-#   Stock_Total, Stock_PIU, Stock_SWDS, Stock_Domestic, Stock_Imports,
-#   Cum_Inflow_Total, Cum_Emitted_EnergyCap, Cum_Emitted_NoEnergyCap
+# Domestic Inflow (MMT C/yr) from eu_array
+# Sum of all ownerships except Imports/Exports/Total; fallback to residual.
 # =========================================================
-print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2022L) {
+domestic_inflow_at <- function(hwp, k) {
+  eu_arr <- hwp$eu_array
+  owners <- dimnames(eu_arr)[[2]]
+  low <- tolower(trimws(owners))
+  mask_dom <- (low != "imports" & low != "exports" & low != "total")
+  s <- function(mask) if (any(mask)) sum(eu_arr[, mask, k, drop = FALSE], na.rm = TRUE) else 0
+  dom <- s(mask_dom)
+  if (dom == 0) {
+    dom <- s(low == "total") - s(low == "imports") - s(low == "exports")
+  }
+  max(dom, 0) / 1e6
+}
+
+# =========================================================
+# Domestic inflow by ownership (MMT C/yr)
+# Returns a named numeric vector for the requested year index k
+# excluding Imports / Exports / Total.
+# =========================================================
+domestic_inflow_by_owner_at <- function(hwp, k) {
+  eu_arr <- hwp$eu_array
+  owners <- trimws(dimnames(eu_arr)[[2]])
+  low    <- tolower(owners)
+  
+  # domestic = everything except imports / exports / total
+  mask_dom    <- (low != "imports" & low != "exports" & low != "total")
+  dom_owners  <- owners[mask_dom]
+  if (!any(mask_dom)) return(setNames(numeric(0), character(0)))
+  
+  idx_dom <- which(mask_dom)
+  flows   <- vapply(
+    idx_dom,
+    function(j) sum(eu_arr[, j, k, drop = FALSE], na.rm = TRUE) / 1e6,
+    numeric(1)
+  )
+  names(flows) <- dom_owners
+  flows
+}
+
+domestic_inflow_series <- function(hwp, years_numeric) {
+  eu_years <- suppressWarnings(as.numeric(dimnames(hwp$eu_array)[[3]]))
+  idx <- match(years_numeric, eu_years)
+  vapply(idx, function(k) domestic_inflow_at(hwp, k), numeric(1))
+}
+
+# =========================================================
+# SWDS_Inflow (MMT C/yr): year-over-year change in total SWDS stock
+# =========================================================
+swds_inflow_at <- function(hwp, k) {
+  sw_arr <- hwp$swdsCtotal_array
+  owners <- dimnames(sw_arr)[[2]]
+  low <- tolower(trimws(owners))
+  jT <- which(low == "total")
+  owners_no_total <- owners[low != "total"]
+  sum_all <- function(kk) {
+    if (length(jT)) sum(sw_arr[, jT, kk, drop = FALSE], na.rm = TRUE)
+    else            sum(sw_arr[, owners_no_total, kk, drop = FALSE], na.rm = TRUE)
+  }
+  if (k <= 1) return(NA_real_)
+  (sum_all(k) - sum_all(k-1)) / 1e6
+}
+
+swds_inflow_series <- function(hwp, years_numeric) {
+  dn_years <- suppressWarnings(as.numeric(dimnames(hwp$swdsCtotal_array)[[3]]))
+  idx <- match(years_numeric, dn_years)
+  vapply(idx, function(k) swds_inflow_at(hwp, k), numeric(1))
+}
+
+# =========================================================
+# Export Outflow (MMT C/yr)
+# Annual quantity that leaves the boundary via any "Exports" ownership in eu_array.
+# =========================================================
+export_outflow_at <- function(hwp, k) {
+  eu_arr <- hwp$eu_array
+  owners <- dimnames(eu_arr)[[2]]
+  low <- tolower(trimws(owners))
+  jExp <- which(low == "exports" | grepl("^export", low))
+  if (!length(jExp)) return(0)
+  sum(eu_arr[, jExp, k, drop = FALSE], na.rm = TRUE) / 1e6
+}
+
+export_outflow_series <- function(hwp, years_numeric) {
+  eu_years <- suppressWarnings(as.numeric(dimnames(hwp$eu_array)[[3]]))
+  idx <- match(years_numeric, eu_years)
+  vapply(idx, function(k) export_outflow_at(hwp, k), numeric(1))
+}
+
+# =========================================================
+# Cumulative Outflow Total helper (MMT C)
+# Preferred: helper table; fallback: cumsum(eec + ewoec)
+# =========================================================
+cum_outflow_total_series <- function(hwp, years_numeric) {
+  if (exists("hwp_totals_from_total", mode = "function")) {
+    tbl <- hwp_totals_from_total(
+      hwp, metric = "MMTC",
+      year_from = min(years_numeric, na.rm = TRUE),
+      year_to   = max(years_numeric, na.rm = TRUE),
+      do_sanity_check = FALSE
+    )
+    tbl <- tbl[tbl$Year %in% years_numeric, ]
+    if (all(c("Cum_Emitted_EnergyCap","Cum_Emitted_NoEnergyCap") %in% names(tbl))) {
+      return(tbl$Cum_Emitted_EnergyCap + tbl$Cum_Emitted_NoEnergyCap)
+    }
+  }
+  eec <- hwp$eec_array; ewo <- hwp$ewoec_array
+  if (is.null(eec) || is.null(ewo)) return(rep(NA_real_, length(years_numeric)))
+  owners <- dimnames(eec)[[2]]; low <- tolower(owners)
+  jT <- which(low == "total"); owners_no_total <- owners[low != "total"]
+  s_year <- function(arr, k) {
+    if (length(jT)) sum(arr[, jT, k, drop = FALSE], na.rm = TRUE)
+    else            sum(arr[, owners_no_total, k, drop = FALSE], na.rm = TRUE)
+  }
+  dn_years <- suppressWarnings(as.numeric(dimnames(eec)[[3]]))
+  idx <- match(years_numeric, dn_years)
+  yr_flow_tons <- vapply(idx, function(k) s_year(eec, k) + s_year(ewo, k), numeric(1))
+  cumsum(yr_flow_tons) / 1e6
+}
+
+# =========================================================
+# EndUseID → PRODUCT CATEGORY BIN DEFINITIONS
+# (copied from your plot_ann_timber_by_enduse_bins logic)
+# =========================================================
+hwp_enduse_bins <- list(
+  "Fuel" = c(1, 48, 95, 142, 197),
+  "Furniture" = c(5,20,28,42,52,68,81,84,99,116,121,139,144,155,165,186),
+  "Housing and Construction" = c(
+    10,21,27,36,57,65,73,91,104,115,125,132,145,164,170,183,
+    12,14,24,37,56,69,78,86,100,108,128,134,146,162,169,184,
+    11,15,26,46,58,62,79,85,102,114,133,152,154,168,185,
+    8,17,29,39,54,70,75,90,103,111,123,138,147,158,175,181,
+    7,18,34,40,59,67,72,93,101,113,127,140,148,160,167,178
+  ),
+  "Residential Repair and Remodeling"    = c(9,16,33,38,49,66,74,83,105,110,126,130,143,161,171,187),
+  "Wood Packaging & Shipping"            = c(4,22,31,44,50,64,77,92,97,112,119,131,150,157,173,182),
+  "Manufacturing Misc."                  = c(2,13,30,43,51,60,80,87,106,107,118,136,149,159,166,180),
+  "Other Industrial Products"            = c(35,82,129,176),
+  "Rail"                                 = c(3,19,25,41,53,63,71,89,96,117,122,137,153,163,172,177),
+  "Paper Products"                       = c(47,94,141,188),
+  "Softwood Misc."                       = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
+  "Hardwood Misc."                       = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209),
+  "Other, N.A."                          = c(6,23,32,45,55,61,76,88,98,109,120,135,151,156,174,179)
+)
+
+# helper: restrict bin IDs to existing EndUse rows
+.get_enduse_rows_for_bin <- function(hwp, bin_name) {
+  ids <- hwp_enduse_bins[[bin_name]]
+  if (is.null(ids)) return(integer(0))
+  n_enduse <- dim(hwp$eu_array)[1]
+  intersect(ids, seq_len(n_enduse))
+}
+
+# =========================================================
+# Annual INPUT by product group (MMT C/yr) at year index k
+# Groups: Paper Products, Housing and Construction, Fuel
+# Includes DOMESTIC + IMPORTS (all ownerships except Exports & Total;
+# falls back to Total only if needed).
+# =========================================================
+inflow_by_product_group_at <- function(hwp, k) {
+  eu_arr  <- hwp$eu_array
+  owners  <- trimws(dimnames(eu_arr)[[2]])
+  low     <- tolower(owners)
+  
+  # Use all non-export, non-total ownerships as "inputs" (domestic + imports)
+  mask_use <- (low != "exports" & low != "total")
+  if (!any(mask_use)) {
+    # fallback: only Total exists
+    mask_use <- (low == "total")
+  }
+  if (!any(mask_use)) {
+    return(setNames(rep(NA_real_, 3),
+                    c("Input_Paper","Input_HousingConstruction","Input_Fuel")))
+  }
+  
+  r_paper <- .get_enduse_rows_for_bin(hwp, "Paper Products")
+  r_house <- .get_enduse_rows_for_bin(hwp, "Housing and Construction")
+  r_fuel  <- .get_enduse_rows_for_bin(hwp, "Fuel")
+  
+  sum_group <- function(r_idx) {
+    if (!length(r_idx)) return(NA_real_)  # NA if no such rows in this model
+    sum(eu_arr[r_idx, mask_use, k, drop = FALSE], na.rm = TRUE) / 1e6
+  }
+  
+  c(
+    Input_Paper               = sum_group(r_paper),
+    Input_HousingConstruction = sum_group(r_house),
+    Input_Fuel                = sum_group(r_fuel)
+  )
+}
+
+# =========================================================
+# HWP stocks for YEAR — includes Domestic_Inflow, SWDS_Inflow,
+# Export_Outflow, inflows by domestic ownership, and
+# annual inputs by product group (Paper / Housing+Constr. / Fuel)
+# =========================================================
+print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2022L,
+                                                  domestic_mode = c("A","B")) {
+  domestic_mode <- match.arg(domestic_mode)
   stopifnot(!is.null(hwp$pu.final_array), !is.null(hwp$swdsCtotal_array))
   pu_arr <- hwp$pu.final_array
   sw_arr <- hwp$swdsCtotal_array
   
-  # --- years from dimnames or hwp$years/Years ---
   get_years <- function(arr) {
     yrs <- NULL
     dn  <- dimnames(arr)
@@ -162,63 +372,68 @@ print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2022L) {
   if (!(year_target %in% years)) stop("Year ", year_target, " not present in arrays.")
   yidx <- match(year_target, years)
   
-  # --- owner names & indices ---
-  owners <- trimws(if (!is.null(dimnames(pu_arr)[[2]])) dimnames(pu_arr)[[2]] else character())
-  if (!length(owners)) stop("Owner dimension names are required on arrays.")
+  owners <- trimws(dimnames(pu_arr)[[2]])
+  low    <- tolower(owners)
+  jT        <- which(low == "total")
+  jImports  <- which(low == "imports")
+  owners_no_total <- owners[low != "total"]
   
-  jT       <- which(owners == "Total")               # optional "Total" column
-  jImports <- which(owners == "Imports")
-  jExports <- which(owners == "Exports")
-  owners_no_total <- setdiff(owners, "Total")
-  
-  # -------- helpers --------
+  s_owner_at <- function(arr, j) if (!length(j)) 0 else sum(arr[, j, yidx, drop = FALSE], na.rm = TRUE)
   sum_overall_all_owners <- function(arr) {
-    if (length(jT)) {
-      sum(arr[, jT, yidx, drop = FALSE], na.rm = TRUE)
-    } else {
-      sum(arr[, owners_no_total, yidx, drop = FALSE], na.rm = TRUE)
-    }
-  }
-  sum_owner <- function(arr, j) {
-    if (!length(j)) return(NA_real_)
-    sum(arr[, j, yidx, drop = FALSE], na.rm = TRUE)
-  }
-  sum_owner_set <- function(arr, jset) {
-    if (!length(jset)) return(NA_real_)
-    sum(arr[, jset, yidx, drop = FALSE], na.rm = TRUE)
+    if (length(jT)) sum(arr[, jT, yidx, drop = FALSE], na.rm = TRUE)
+    else            sum(arr[, owners_no_total, yidx, drop = FALSE], na.rm = TRUE)
   }
   
-  # -------- Overall (ALL ownerships, incl. Exports) --------
   pu_overall  <- sum_overall_all_owners(pu_arr) / 1e6
   sw_overall  <- sum_overall_all_owners(sw_arr) / 1e6
   tot_overall <- pu_overall + sw_overall
   
-  # -------- Domestic vs Imports stocks --------
-  # Domestic := all owners EXCEPT "Imports" and "Total" (and exclude "Exports" if present)
-  jDomestic <- which(owners %in% setdiff(owners_no_total, c("Imports", "Exports")))
-  pu_dom <- sum_owner_set(pu_arr, jDomestic) / 1e6
-  sw_dom <- sum_owner_set(sw_arr, jDomestic) / 1e6
-  stock_domestic <- if (is.na(pu_dom) || is.na(sw_dom)) NA_real_ else pu_dom + sw_dom
+  stock_domestic <- dom_from_totals_at(hwp, yidx, domestic_mode)
+  stock_imports  <- (s_owner_at(pu_arr, jImports) + s_owner_at(sw_arr, jImports)) / 1e6
   
-  pu_imp <- sum_owner(pu_arr, jImports) / 1e6
-  sw_imp <- sum_owner(sw_arr, jImports) / 1e6
-  stock_imports <- if (is.na(pu_imp) || is.na(sw_imp)) NA_real_ else pu_imp + sw_imp
+  domestic_inflow <- domestic_inflow_at(hwp, yidx)
+  swds_inflow     <- swds_inflow_at(hwp, yidx)
+  export_outflow  <- export_outflow_at(hwp, yidx)   # FLOW ONLY
   
-  # -------- Pull cumulative (2001..year_target) from your existing helper --------
-  cum_tbl <- hwp_totals_from_total(
-    hwp,
-    metric    = "MMTC",
-    year_from = min(2001L, min(years, na.rm = TRUE)),
-    year_to   = year_target,
-    do_sanity_check = FALSE
-  )
-  cum_row <- cum_tbl[cum_tbl$Year == year_target, ]
-  if (!nrow(cum_row)) stop("No cumulative row found for requested year.")
+  # ---- inflows by ownership (domestic only) ----
+  inflow_by_owner <- domestic_inflow_by_owner_at(hwp, yidx)
+  inflow_owner_list <- list()
+  if (length(inflow_by_owner)) {
+    nm <- names(inflow_by_owner)
+    inflow_owner_list <- as.list(round(inflow_by_owner, 3))
+    names(inflow_owner_list) <- paste0("Inflow_", nm)
+  }
   
-  # -------- Overall line with requested fields --------
-  # Fields requested:
-  # Stock_Total, Stock_PIU, Stock_SWDS, Stock_Domestic, Stock_Imports,
-  # Cum_Inflow_Total, Cum_Emitted_EnergyCap, Cum_Emitted_NoEnergyCap
+  # ---- annual inputs by product group (domestic + imports) ----
+  inflow_groups <- inflow_by_product_group_at(hwp, yidx)
+  inflow_group_list <- list()
+  if (length(inflow_groups)) {
+    inflow_group_list <- as.list(round(inflow_groups, 3))
+  }
+  
+  # cumulative via helper / fallback
+  cum_tbl <- if (exists("hwp_totals_from_total", mode = "function")) {
+    hwp_totals_from_total(
+      hwp, metric = "MMTC",
+      year_from = min(2001L, min(years, na.rm = TRUE)),
+      year_to   = year_target,
+      do_sanity_check = FALSE
+    )
+  } else NULL
+  
+  if (!is.null(cum_tbl)) {
+    cum_row <- cum_tbl[cum_tbl$Year == year_target, ]
+    if (!nrow(cum_row)) stop("No cumulative row found for requested year.")
+    cum_inflow         <- cum_row$Cum_Inflow_Total
+    cum_e_cap          <- cum_row$Cum_Emitted_EnergyCap
+    cum_e_no_cap       <- cum_row$Cum_Emitted_NoEnergyCap
+    cum_outflow_total  <- cum_e_cap + cum_e_no_cap
+  } else {
+    Y <- years[years <= year_target]
+    cum_outflow_total <- tail(cum_outflow_total_series(hwp, Y), 1)
+    cum_inflow <- NA_real_; cum_e_cap <- NA_real_; cum_e_no_cap <- NA_real_
+  }
+  
   df_report <- data.frame(
     Year                      = year_target,
     Stock_Total               = round(tot_overall, 3),
@@ -226,131 +441,62 @@ print_hwp_stocks_2022_include_exports <- function(hwp, year_target = 2022L) {
     Stock_SWDS                = round(sw_overall, 3),
     Stock_Domestic            = round(stock_domestic, 3),
     Stock_Imports             = round(stock_imports, 3),
-    Cum_Inflow_Total          = cum_row$Cum_Inflow_Total,
-    Cum_Emitted_EnergyCap     = cum_row$Cum_Emitted_EnergyCap,
-    Cum_Emitted_NoEnergyCap   = cum_row$Cum_Emitted_NoEnergyCap,
+    Domestic_Inflow           = round(domestic_inflow, 3),
+    SWDS_Inflow               = round(swds_inflow, 3),
+    Export_Outflow            = round(export_outflow, 3),
+    Cum_Inflow_Total          = cum_inflow,
+    Cum_Outflow_Total         = cum_outflow_total,
+    Cum_Emitted_EnergyCap     = cum_e_cap,
+    Cum_Emitted_NoEnergyCap   = cum_e_no_cap,
     check.names = FALSE
   )
   
-  # -------- By Ownership (incl. Exports; exclude "Total") --------
-  df_owners <- do.call(rbind, lapply(owners_no_total, function(own) {
-    j   <- which(owners == own)
-    pu  <- sum_owner(pu_arr, j) / 1e6
-    sw  <- sum_owner(sw_arr, j) / 1e6
-    data.frame(
-      Year        = year_target,
-      Owner       = own,
-      PIU_MMT_C   = round(pu, 3),
-      SWDS_MMT_C  = round(sw, 3),
-      Total_MMT_C = round(pu + sw, 3),
-      check.names = FALSE
+  if (length(inflow_owner_list)) {
+    df_report <- cbind(
+      df_report,
+      as.data.frame(inflow_owner_list, check.names = FALSE)
     )
-  }))
-  rownames(df_owners) <- NULL
-  
-  # -------- By Product Category (sum over ALL ownerships incl. Exports; exclude "Total") --------
-  n_ids <- dim(pu_arr)[1]
-  cat_map <- list(
-    "Fuel" = c(1,48,95,142,197),
-    "Furniture" = c(5,20,28,42,52,68,81,84,99,116,121,139,144,155,165,186),
-    "Housing and Construction" = c(
-      10,21,27,36,57,65,73,91,104,115,125,132,145,164,170,183,
-      12,14,24,37,56,69,78,86,100,108,128,134,146,162,169,184,
-      11,15,26,46,58,62,79,85,102,114,133,152,154,168,185,
-      8,17,29,39,54,70,75,90,103,111,123,138,147,158,175,181,
-      7,18,34,40,59,67,72,93,101,113,127,140,148,160,167,178
-    ),
-    "Residential Repair and Remodeling" = c(9,16,33,38,49,66,74,83,105,110,126,130,143,161,171,187),
-    "Packaging & Shipping" = c(4,22,31,44,50,64,77,92,97,112,119,131,150,157,173,182),
-    "Manufacturing Misc." = c(2,13,30,43,51,60,80,87,106,107,118,136,149,159,166,180),
-    "Other Industrial Products" = c(35,82,129,176),
-    "Rail"  = c(3,19,25,41,53,63,71,89,96,117,122,137,153,163,172,177),
-    "Paper" = c(47,94,141,188),
-    "Softwood Misc." = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
-    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209),
-    "Other" = c(6,23,32,45,55,61,76,88,98,109,120,135,151,156,174,179)
-  )
-  cat_map <- lapply(cat_map, function(v) intersect(v, seq_len(n_ids)))
-  
-  owners_for_cats <- owners_no_total  # sum across all owners EXCEPT the "Total" column
-  sum_cat_all <- function(arr, ids) {
-    if (!length(ids)) return(0)
-    sum(arr[ids, owners_for_cats, yidx, drop = FALSE], na.rm = TRUE)
   }
   
-  df_cats <- do.call(rbind, lapply(names(cat_map), function(cat) {
-    ids <- cat_map[[cat]]
-    pu_c <- sum_cat_all(pu_arr, ids) / 1e6
-    sw_c <- sum_cat_all(sw_arr, ids) / 1e6
-    data.frame(
-      Year        = year_target,
-      Category    = cat,
-      PIU_MMT_C   = round(pu_c, 3),
-      SWDS_MMT_C  = round(sw_c, 3),
-      Total_MMT_C = round(pu_c + sw_c, 3),
-      check.names = FALSE
+  if (length(inflow_group_list)) {
+    df_report <- cbind(
+      df_report,
+      as.data.frame(inflow_group_list, check.names = FALSE)
     )
-  }))
-  rownames(df_cats) <- NULL
+  }
   
-  # -------- Print results --------
-  cat("=== HWP Carbon Stocks (MMT C) — Year", year_target, "(including Exports) ===\n\n")
-  
-  cat("[Overall — requested report fields]\n")
+  cat("=== HWP Carbon Stocks (MMT C) — Year", year_target,
+      "===\n(Domestic stock = Total − Imports",
+      if (domestic_mode == "B") " − Exports" else "",
+      "; flows in MMT C/yr; Export_Outflow = C leaving CA;\n",
+      "Inflow_<Ownership> columns report domestic inflows by ownership;\n",
+      "Input_Paper / Input_HousingConstruction / Input_Fuel include domestic + imports.)\n\n", sep = "")
   print(df_report, row.names = FALSE)
-  
-  cat("\n[By Ownership — including Exports (excludes 'Total' column)]\n")
-  print(df_owners, row.names = FALSE)
-  
-  cat("\n[By Product Category — sum over all ownerships including Exports]\n")
-  print(df_cats, row.names = FALSE)
-  
-  invisible(list(
-    report_line            = df_report,
-    by_ownership_incl_exp  = df_owners,
-    by_category_incl_exp   = df_cats
-  ))
+  invisible(df_report)
 }
 
-# ---- Example call (prints 2022 with Exports included) ----
-out_2022_incExp <- print_hwp_stocks_2022_include_exports(hwp)
-
-# Optional CSVs:
-# write.csv(out_2022_incExp$report_line,           "HWP_reportline_2022.csv", row.names = FALSE)
-# write.csv(out_2022_incExp$by_ownership_incl_exp, "HWP_byOwnership_2022_inclExports.csv", row.names = FALSE)
-# write.csv(out_2022_incExp$by_category_incl_exp,  "HWP_byCategory_2022_inclExports.csv", row.names = FALSE)
-
-
-
 # ================================
-# One-row report for a target year
-# Fields:
-#   Stock_Total, Stock_PIU, Stock_SWDS, Stock_Domestic, Stock_Imports,
-#   Cum_Inflow_Total, Cum_Emitted_EnergyCap, Cum_Emitted_NoEnergyCap
-# Units: MMT C (set metric="CO2e" in the cumulative helper if you want CO2e)
-# Behavior:
-#   - For all years < pre_class_year (default 1952), unclassified stock is
-#     assigned to Domestic: Stock_Domestic = Stock_Total - Stock_Imports (or Stock_Total if imports missing).
-#   - For years >= pre_class_year, the last pre-1952 Domestic stock is carried forward
-#     as a baseline and added to the classified Domestic so the series is continuous.
+# Report table for a range of years
+# Includes Domestic_Inflow, SWDS_Inflow, Export_Outflow flows,
+# inflows by domestic ownership, and annual inputs by product group
 # ================================
-
 hwp_report_table <- function(hwp,
                              year_from = 2001L,
                              year_to   = 2022L,
                              metric_cum = c("MMTC","CO2e"),
-                             pre_class_year = 1952L,
+                             domestic_mode = c("A","B"),
                              cap_dom_to_total = TRUE) {
-  metric_cum <- match.arg(metric_cum)
+  metric_cum    <- match.arg(metric_cum)
+  domestic_mode <- match.arg(domestic_mode)
+  
   stopifnot(!is.null(hwp$pu.final_array), !is.null(hwp$swdsCtotal_array))
   pu_arr <- hwp$pu.final_array
   sw_arr <- hwp$swdsCtotal_array
+  eu_arr <- hwp$eu_array
   
-  # -------- small helpers --------
   to_mmt <- function(x_tons) (if (length(x_tons)) x_tons else 0) / 1e6
-  nz0    <- function(x) { x[is.na(x) | !is.finite(x)] <- 0; x }  # NA/Inf -> 0
+  nz0    <- function(x) { x[is.na(x) | !is.finite(x)] <- 0; x }
   
-  # ---- resolve years ----
   get_years <- function(arr) {
     yrs <- NULL
     dn  <- dimnames(arr)
@@ -366,362 +512,242 @@ hwp_report_table <- function(hwp,
   years <- get_years(pu_arr)
   rng   <- which(years >= year_from & years <= year_to)
   if (!length(rng)) stop("No years in requested window.")
-  Y     <- years[rng]
-  nY    <- length(Y)
+  Y  <- years[rng]
+  nY <- length(Y)
   
-  # ---- owners ----
-  owners <- trimws(if (!is.null(dimnames(pu_arr)[[2]])) dimnames(pu_arr)[[2]] else character())
-  if (!length(owners)) stop("Owner dimension names are required on arrays.")
-  jT        <- which(owners == "Total")
-  jImports  <- which(owners == "Imports")
-  jExports  <- which(owners == "Exports")
-  owners_no_total <- setdiff(owners, "Total")
-  jDomestic <- which(owners %in% setdiff(owners_no_total, c("Imports","Exports")))
+  owners <- trimws(dimnames(pu_arr)[[2]])
+  low    <- tolower(owners)
+  jT        <- which(low == "total")
+  jImports  <- which(low == "imports")
+  owners_no_total <- owners[low != "total"]
   
-  # ---- helpers to sum (tons C) ----
+  mask_dom    <- (low != "imports" & low != "exports" & low != "total")
+  dom_owners  <- owners[mask_dom]
+  idx_dom     <- which(mask_dom)
+  nDom        <- length(dom_owners)
+  
   sum_overall_all_owners_at <- function(arr, k) {
-    if (length(jT)) {
-      sum(arr[, jT, k, drop = FALSE], na.rm = TRUE)
-    } else {
-      sum(arr[, owners_no_total, k, drop = FALSE], na.rm = TRUE)
-    }
+    if (length(jT)) sum(arr[, jT, k, drop = FALSE], na.rm = TRUE)
+    else            sum(arr[, owners_no_total, k, drop = FALSE], na.rm = TRUE)
   }
   sum_owner_at <- function(arr, j, k) {
-    if (!length(j)) return(NA_real_)
+    if (!length(j)) return(0)
     sum(arr[, j, k, drop = FALSE], na.rm = TRUE)
   }
-  sum_owner_set_at <- function(arr, jset, k) {
-    if (!length(jset)) return(NA_real_)
-    sum(arr[, jset, k, drop = FALSE], na.rm = TRUE)
+  
+  stock_piu   <- stock_sw <- stock_tot <- numeric(nY)
+  stock_imp   <- numeric(nY)
+  stock_dom   <- numeric(nY)
+  inflow_dom  <- numeric(nY)
+  inflow_swds <- numeric(nY)
+  export_out  <- numeric(nY)
+  
+  inflow_by_owner_mat <- if (nDom) {
+    mat <- matrix(0, nrow = nY, ncol = nDom)
+    colnames(mat) <- dom_owners
+    mat
+  } else {
+    NULL
   }
   
-  # ---- compute core series (in MMT C) ----
-  stock_piu <- stock_sw <- stock_tot <- numeric(nY)
-  stock_imp <- rep(NA_real_, nY)   # imports
-  dom_class <- rep(NA_real_, nY)   # classified domestic (post-1952)
+  group_names <- c("Input_Paper","Input_HousingConstruction","Input_Fuel")
+  inflow_by_group_mat <- matrix(NA_real_, nrow = nY, ncol = length(group_names))
+  colnames(inflow_by_group_mat) <- group_names
   
   for (i in seq_along(rng)) {
     k <- rng[i]
     pu_tot_tons <- sum_overall_all_owners_at(pu_arr, k)
     sw_tot_tons <- sum_overall_all_owners_at(sw_arr, k)
-    
     stock_piu[i] <- to_mmt(pu_tot_tons)
     stock_sw[i]  <- to_mmt(sw_tot_tons)
     stock_tot[i] <- to_mmt(pu_tot_tons + sw_tot_tons)
     
-    # imports (may be NA if no owner slice)
-    imp_tons <- sum(c(sum_owner_at(pu_arr, jImports, k),
-                      sum_owner_at(sw_arr, jImports, k)), na.rm = TRUE)
-    stock_imp[i] <- if (is.finite(imp_tons)) to_mmt(imp_tons) else NA_real_
+    imp_tons <- sum_owner_at(pu_arr, jImports, k) + sum_owner_at(sw_arr, jImports, k)
+    stock_imp[i] <- to_mmt(imp_tons)
     
-    # classified domestic (excl Total/Imports/Exports) — NA in early years
-    dom_tons <- sum(c(sum_owner_set_at(pu_arr, jDomestic, k),
-                      sum_owner_set_at(sw_arr, jDomestic, k)), na.rm = TRUE)
-    dom_class[i] <- if (is.finite(dom_tons) && dom_tons != 0) to_mmt(dom_tons) else NA_real_
+    stock_dom[i]   <- dom_from_totals_at(hwp, k, domestic_mode)
+    inflow_dom[i]  <- domestic_inflow_at(hwp, k)
+    inflow_swds[i] <- swds_inflow_at(hwp, k)
+    export_out[i]  <- export_outflow_at(hwp, k)
+    
+    if (nDom) {
+      inflows_k <- vapply(
+        idx_dom,
+        function(j) sum(eu_arr[, j, k, drop = FALSE], na.rm = TRUE) / 1e6,
+        numeric(1)
+      )
+      inflow_by_owner_mat[i, ] <- inflows_k
+    }
+    
+    grp_vals <- inflow_by_product_group_at(hwp, k)
+    inflow_by_group_mat[i, ] <- as.numeric(grp_vals)
   }
   
-  # ---- build Domestic with pre-1952 baseline carried forward ----
-  is_pre  <- Y < pre_class_year
-  is_post <- !is_pre
+  stock_dom[!is.finite(stock_dom) | stock_dom < 0] <- 0
+  if (isTRUE(cap_dom_to_total)) stock_dom <- pmin(stock_dom, stock_tot)
   
-  # pre: Domestic = Total - Imports (imports default 0)
-  pre_dom <- nz0(stock_tot) - nz0(stock_imp)
-  pre_dom[!is_pre] <- NA_real_
-  
-  # baseline = last non-NA pre-1952 Domestic
-  last_pre_idx <- tail(which(is_pre & is.finite(pre_dom)), 1)
-  baseline <- if (length(last_pre_idx)) pre_dom[last_pre_idx] else 0
-  
-  # post: Domestic = classified_dom (NA->0) + baseline
-  post_dom <- nz0(dom_class) + baseline
-  post_dom[!is_post] <- NA_real_
-  
-  # final Domestic
-  stock_dom <- ifelse(is_pre, nz0(pre_dom), nz0(post_dom))
-  
-  # guards
-  stock_dom[stock_dom < 0 | !is.finite(stock_dom)] <- 0
-  if (isTRUE(cap_dom_to_total)) {
-    stock_dom <- pmin(stock_dom, stock_tot)
+  if (exists("hwp_totals_from_total", mode = "function")) {
+    cum_tbl <- hwp_totals_from_total(
+      hwp, metric = metric_cum,
+      year_from = min(Y), year_to = max(Y),
+      do_sanity_check = FALSE
+    )
+    cum_tbl <- cum_tbl[cum_tbl$Year %in% Y, ]
+    cum_outflow_total <- cum_tbl$Cum_Emitted_EnergyCap + cum_tbl$Cum_Emitted_NoEnergyCap
+    
+    out <- data.frame(
+      Year                       = Y,
+      Stock_Total                = round(stock_tot, 3),
+      Stock_PIU                  = round(stock_piu, 3),
+      Stock_SWDS                 = round(stock_sw, 3),
+      Stock_Domestic             = round(stock_dom, 3),
+      Stock_Imports              = round(nz0(stock_imp), 3),
+      Domestic_Inflow            = round(inflow_dom, 3),
+      SWDS_Inflow                = round(inflow_swds, 3),
+      Export_Outflow             = round(export_out, 3),
+      Cum_Inflow_Total           = cum_tbl$Cum_Inflow_Total,
+      Cum_Outflow_Total          = cum_outflow_total,
+      Cum_Emitted_EnergyCap      = cum_tbl$Cum_Emitted_EnergyCap,
+      Cum_Emitted_NoEnergyCap    = cum_tbl$Cum_Emitted_NoEnergyCap,
+      check.names = FALSE
+    )
+  } else {
+    cum_outflow_total <- cum_outflow_total_series(hwp, Y)
+    
+    out <- data.frame(
+      Year                       = Y,
+      Stock_Total                = round(stock_tot, 3),
+      Stock_PIU                  = round(stock_piu, 3),
+      Stock_SWDS                 = round(stock_sw, 3),
+      Stock_Domestic             = round(stock_dom, 3),
+      Stock_Imports              = round(nz0(stock_imp), 3),
+      Domestic_Inflow            = round(inflow_dom, 3),
+      SWDS_Inflow                = round(inflow_swds, 3),
+      Export_Outflow             = round(export_out, 3),
+      Cum_Inflow_Total           = NA_real_,
+      Cum_Outflow_Total          = cum_outflow_total,
+      Cum_Emitted_EnergyCap      = NA_real_,
+      Cum_Emitted_NoEnergyCap    = NA_real_,
+      check.names = FALSE
+    )
   }
   
-  # ---- cumulative series using your helper (aligned to Y) ----
-  cum_tbl <- hwp_totals_from_total(
-    hwp,
-    metric = metric_cum,     # "MMTC" or "CO2e"
-    year_from = min(Y),
-    year_to   = max(Y),
-    do_sanity_check = FALSE
-  )
-  cum_tbl <- cum_tbl[cum_tbl$Year %in% Y, ]
+  if (!is.null(inflow_by_owner_mat) && nDom) {
+    owner_cols <- as.data.frame(round(inflow_by_owner_mat, 3))
+    colnames(owner_cols) <- paste0("Inflow_", dom_owners)
+    out <- cbind(out, owner_cols)
+  }
   
-  # ---- assemble final table ----
-  out <- data.frame(
-    Year                       = Y,
-    Stock_Total                = round(stock_tot, 3),
-    Stock_PIU                  = round(stock_piu, 3),
-    Stock_SWDS                 = round(stock_sw, 3),
-    Stock_Domestic             = round(stock_dom, 3),
-    Stock_Imports              = round(nz0(stock_imp), 3),
-    Cum_Inflow_Total           = cum_tbl$Cum_Inflow_Total,
-    Cum_Emitted_EnergyCap      = cum_tbl$Cum_Emitted_EnergyCap,
-    Cum_Emitted_NoEnergyCap    = cum_tbl$Cum_Emitted_NoEnergyCap,
-    check.names = FALSE
-  )
+  if (!is.null(inflow_by_group_mat)) {
+    group_cols <- as.data.frame(round(inflow_by_group_mat, 3))
+    colnames(group_cols) <- colnames(inflow_by_group_mat)
+    out <- cbind(out, group_cols)
+  }
+  
+  jump_idx <- which(diff(out$Stock_Domestic) < -1e-6) + 1L
+  if (length(jump_idx)) {
+    message("Note: Stock_Domestic decreases at years: ",
+            paste(out$Year[jump_idx], collapse = ", "),
+            " (valid if retirements > inflows).")
+  }
   
   print(out, row.names = FALSE)
   invisible(out)
 }
 
-# Example
-tbl_report <- hwp_report_table(hwp, year_from = 1904, year_to = 2022, metric_cum = "MMTC")
-
-
-
+# ---- Example one-year & full table ----
+out_2022 <- print_hwp_stocks_2022_include_exports(hwp, 2022, domestic_mode = "A")
+tbl_report <- hwp_report_table(hwp, year_from = 1940, year_to = 1980, metric_cum = "MMTC",
+                               domestic_mode = "A")
 
 
 
 # =========================================================
 # Annual timber harvest by PRODUCT CATEGORY (EndUseID bins)
-#   metric:  "MMTC" | "CO2e" | "BBF"   (arrays assumed in MMT C)
+#   metric:  "MMTC" | "CO2e" | "BBF"  (arrays assumed in MMT C)
 #   summary: "annual" | "cumulative"
 #   mode:    "category_total" | "category" | "total"
+#   keep_exports: if TRUE, Exports are kept and negated; if FALSE, removed
+# Assumes helpers: .get_years(hwp), .get_ownerships(hwp)
 # =========================================================
 
 plot_ann_timber_by_enduse_bins <- function(
     hwp,
-    metric  = c("MMTC","CO2e","BBF"),
-    summary = c("annual","cumulative"),
-    mode    = c("category_total","category","total")
+    metric       = c("MMTC","CO2e","BBF"),
+    summary      = c("annual","cumulative"),
+    mode         = c("category_total","category","total"),
+    keep_exports = FALSE
 ) {
-  metric  <- match.arg(metric); summary <- match.arg(summary); mode <- match.arg(mode)
+  metric  <- match.arg(metric)
+  summary <- match.arg(summary)
+  mode    <- match.arg(mode)
   
-  # private axis helper
+  # ---- Theme (local to function) ----
+  common_theme <- ggplot2::theme_bw(base_size = 14) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.title       = ggplot2::element_text(size = 24),
+      axis.text        = ggplot2::element_text(size = 18),
+      panel.border     = ggplot2::element_rect(color = "grey60", fill = NA, linewidth = 0.6),
+      plot.background  = ggplot2::element_rect(fill = "white", color = NA),
+      panel.spacing    = grid::unit(1, "lines"),
+      legend.position  = "top",
+      legend.justification = "center",
+      legend.box.just       = "center",
+      legend.box            = "vertical",
+      legend.title          = ggplot2::element_blank(),
+      legend.text           = ggplot2::element_text(size = 16),
+      legend.key.size       = grid::unit(22, "pt"),
+      legend.key.width      = grid::unit(25, "pt"),
+      legend.box.margin     = ggplot2::margin(8, 10, 0, 10),
+      legend.spacing.x      = grid::unit(14, "pt"),
+      plot.margin           = ggplot2::margin(22, 18, 10, 14)
+    )
+  
+  # ---- axis helper ----
   .axis_pretty_local <- function(x, positive_only = FALSE, n = 6) {
     x <- x[is.finite(x)]
     if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
-    rng <- range(x, na.rm = TRUE); if (!positive_only) rng[1] <- min(0, rng[1])
-    br <- pretty(rng, n = n); list(min = min(br), max = max(br), by = diff(br)[1])
+    rng <- range(x, na.rm = TRUE)
+    if (!positive_only) rng[1] <- min(0, rng[1])
+    br <- pretty(rng, n = n)
+    list(min = min(br), max = max(br), by = diff(br)[1])
   }
   
+  # ---- years ----
   years <- .get_years(hwp)
   
-  # ----- collapse ownerships -----
-  owns_raw   <- .get_ownerships(hwp)
-  owns_clean <- gsub("\\.", " ", owns_raw)
+  # ----- collapse ownerships and get mat_enduse ----- #
+  owns_raw    <- .get_ownerships(hwp)
+  owns_clean  <- gsub("\\.", " ", owns_raw)
   idx_total   <- which(owns_clean == "Total")
   idx_exports <- which(owns_clean == "Exports")
   
   idx_keep <- setdiff(seq_along(owns_clean), idx_total)
   if (!keep_exports) idx_keep <- setdiff(idx_keep, idx_exports)
+  
   eu <- hwp$eu_array[, idx_keep, , drop = FALSE]
   
   if (keep_exports && length(idx_exports)) {
     exp_in_keep <- which(owns_clean[idx_keep] == "Exports")
-    if (length(exp_in_keep)) eu[, exp_in_keep, ] <- -eu[, exp_in_keep, , drop = FALSE]
-  }
-  
-  mat_enduse <- t(apply(eu, c(1, 3), sum)) / 1e6
-  if (length(idx_total)) {
-    mat_total <- t(apply(hwp$eu_array[, idx_total, , drop = FALSE], c(1, 3), sum)) / 1e6
-    pre_mask <- years <= 1951
-    zero_rows <- rowSums(mat_enduse, na.rm = TRUE) == 0
-    rows_to_replace <- pre_mask & zero_rows
-    if (any(rows_to_replace)) mat_enduse[rows_to_replace, ] <- mat_total[rows_to_replace, ]
-  }
-  
-  # ----- EndUseID → bins -----
-  bin_defs <- list(
-    "Fuel" = c(1,48,95,142,197),
-    "Furniture" = c(5,20,28,42,52,68,81,84,99,116,121,139,144,155,165,186),
-    "Housing and Construction" = c(
-      10,21,27,36,57,65,73,91,104,115,125,132,145,164,170,183,
-      12,14,24,37,56,69,78,86,100,108,128,134,146,162,169,184,
-      11,15,26,46,58,62,79,85,102,114,133,152,154,168,185,
-      8,17,29,39,54,70,75,90,103,111,123,138,147,158,175,181,
-      7,18,34,40,59,67,72,93,101,113,127,140,148,160,167,178
-    ),
-    "Residential Repair and Remodeling" = c(9,16,33,38,49,66,74,83,105,110,126,130,143,161,171,187),
-    "Packaging & Shipping" = c(4,22,31,44,50,64,77,92,97,112,119,131,150,157,173,182),
-    "Manufacturing Misc." = c(2,13,30,43,51,60,80,87,106,107,118,136,149,159,166,180),
-    "Other Industrial Products" = c(35,82,129,176),
-    "Rail"  = c(3,19,25,41,53,63,71,89,96,117,122,137,153,163,172,177),
-    "Paper" = c(47,94,141,188),
-    "Softwood Misc." = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
-    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209),
-    "Other, N.A." = c(6,23,32,45,55,61,76,88,98,109,120,135,151,156,174,179)
-  )
-  
-  n_ids <- ncol(mat_enduse); if (is.null(n_ids)) n_ids <- 0
-  if (n_ids == 0) stop("eu_array appears empty or has unexpected dimensions.")
-  
-  id_to_cat <- rep(NA_character_, n_ids)
-  for (cat in names(bin_defs)) {
-    ids  <- intersect(bin_defs[[cat]], seq_len(n_ids))
-    free <- ids[is.na(id_to_cat[ids])]
-    id_to_cat[free] <- if (cat == "Other, N.A.") "Other" else cat
-  }
-  keep_cols <- which(!is.na(id_to_cat))
-  id_to_cat <- id_to_cat[keep_cols]
-  mat_enduse <- mat_enduse[, keep_cols, drop = FALSE]
-  
-  present <- unique(id_to_cat)
-  cat_mat <- sapply(present, function(cat) {
-    cols <- which(id_to_cat == cat)
-    rowSums(mat_enduse[, cols, drop = FALSE], na.rm = TRUE)
-  })
-  cat_mat <- as.matrix(cat_mat); rownames(cat_mat) <- years
-  
-  df <- as.data.frame(cat_mat); df$Year <- years
-  long <- tidyr::pivot_longer(df, -Year, names_to = "Category", values_to = "Value")
-  long$Year <- as.numeric(long$Year)
-  
-  if (summary == "cumulative") {
-    long <- long |>
-      dplyr::group_by(Category) |>
-      dplyr::mutate(Value = cumsum(Value)) |>
-      dplyr::ungroup()
-  }
-  
-  # metric conversion / labels
-  ylab <- "MMT C"
-  if (metric == "CO2e") { long$Value <- long$Value * (44/12); ylab <- expression("MMT C"*O[2]*e) }
-  if (metric == "BBF")  { ylab <- "BBF" }
-  
-  # totals (full series) & axis
-  df_total <- long |>
-    dplyr::group_by(Year) |>
-    dplyr::summarise(Total = sum(Value, na.rm = TRUE), .groups = "drop")
-  
-  yr_env <- long |>
-    dplyr::group_by(Year) |>
-    dplyr::summarise(pos = sum(pmax(Value, 0), na.rm = TRUE),
-                     neg = sum(pmin(Value, 0), na.rm = TRUE), .groups = "drop")
-  ax <- .axis_pretty_local(c(yr_env$pos, yr_env$neg), positive_only = FALSE)
-  
-  # palette/order
-  plot_levels <- c(
-    "Fuel","Furniture","Housing and Construction","Residential Repair and Remodeling",
-    "Packaging & Shipping","Manufacturing Misc.","Other Industrial Products","Rail","Paper",
-    "Softwood Misc.","Hardwood Misc.","Other"
-  )
-  pal_cat <- c(
-    "Fuel"="#EE7733","Furniture"="#0077BB","Housing and Construction"="#009988",
-    "Residential Repair and Remodeling"="#6A3D9A","Packaging & Shipping"="#33BBEE",
-    "Manufacturing Misc."="#EE3377","Other Industrial Products"="#CC3311","Rail"="#228833",
-    "Paper"="#CCBB44","Softwood Misc."="#332288","Hardwood Misc."="#AA4499","Other"="#999933"
-  )
-  present_levels <- intersect(plot_levels, unique(long$Category))
-  long$Category  <- factor(long$Category, levels = present_levels)
-  
-  if (mode %in% c("category","category_total")) {
-    p <- ggplot2::ggplot() +
-      ggplot2::geom_area(
-        data = long,  # FULL series
-        ggplot2::aes(Year, Value, fill = Category),
-        alpha = 1.0, color = "white", linewidth = 0.2
-      ) +
-      ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
-      ggplot2::scale_fill_manual(values = pal_cat[present_levels],
-                                 breaks = present_levels,
-                                 name   = "Product category") +
-      ggplot2::scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
-                                  limits = c(ax$min, ax$max), expand = c(0, 0)) +
-      ggplot2::scale_x_continuous(limits = c(min(years, na.rm=TRUE), max(years, na.rm=TRUE))) +
-      ggplot2::labs(
-        x = "Harvest Year",
-        y = ylab,
-        title = paste0(if (summary == "cumulative") "Cumulative" else "Annual",
-                       " C influx by product category")
-      ) +
-      ggplot2::theme_bw(base_size = 14) +
-      ggplot2::theme(legend.position = "right")
-    
-    if (mode == "category_total") {
-      p <- p +
-        ggplot2::geom_line(data = df_total,
-                           ggplot2::aes(Year, Total, color = "Total"),
-                           linewidth = 0.9, inherit.aes = FALSE) +
-        ggplot2::scale_color_manual(values = c(Total = "black"), name = NULL)
+    if (length(exp_in_keep)) {
+      eu[, exp_in_keep, ] <- -eu[, exp_in_keep, , drop = FALSE]
     }
-    return(p)
-  }
-  
-  # mode == "total"
-  ggplot2::ggplot(df_total, ggplot2::aes(Year, Total)) +
-    ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
-    ggplot2::geom_line(linewidth = 1.0) +
-    ggplot2::scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
-                                limits = c(ax$min, ax$max), expand = c(0, 0)) +
-    ggplot2::scale_x_continuous(limits = c(min(years, na.rm=TRUE), max(years, na.rm=TRUE))) +
-    ggplot2::labs(
-      x = "Harvest Year",
-      y = ylab,
-      title = paste0(if (summary == "cumulative") "Cumulative" else "Annual",
-                     " C influx (total)")
-    ) +
-    ggplot2::theme_bw(base_size = 14)
-}
-
-
-p_cat <- plot_ann_timber_by_enduse_bins(
-  hwp,
-  metric  = "MMTC",        # or "CO2e"
-  summary = "annual",      # or "cumulative"
-  mode    = "category_total"
-)
-print(p_cat)
-
-
-
-
-# ============= TRANSPARENT PRE-2001 ===========
-plot_ann_timber_by_enduse_bins <- function(
-    hwp,
-    metric  = c("MMTC","CO2e","BBF"),
-    summary = c("annual","cumulative"),
-    mode    = c("category_total","category","total"),
-    keep_exports = TRUE,
-    transparent_before = 1965L
-) {
-  metric  <- match.arg(metric); summary <- match.arg(summary); mode <- match.arg(mode)
-  
-  # private axis helper (no clashes)
-  .axis_pretty_local <- function(x, positive_only = FALSE, n = 6) {
-    x <- x[is.finite(x)]
-    if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
-    rng <- range(x, na.rm = TRUE); if (!positive_only) rng[1] <- min(0, rng[1])
-    br <- pretty(rng, n = n); list(min = min(br), max = max(br), by = diff(br)[1])
-  }
-  
-  years <- .get_years(hwp)
-  cut_year <- as.integer(transparent_before)
-  
-  # ----- collapse ownerships (unchanged) -----
-  owns_raw   <- .get_ownerships(hwp)
-  owns_clean <- gsub("\\.", " ", owns_raw)
-  idx_total   <- which(owns_clean == "Total")
-  idx_exports <- which(owns_clean == "Exports")
-  
-  idx_keep <- setdiff(seq_along(owns_clean), idx_total)
-  if (!keep_exports) idx_keep <- setdiff(idx_keep, idx_exports)
-  eu <- hwp$eu_array[, idx_keep, , drop = FALSE]
-  
-  if (keep_exports && length(idx_exports)) {
-    exp_in_keep <- which(owns_clean[idx_keep] == "Exports")
-    if (length(exp_in_keep)) eu[, exp_in_keep, ] <- -eu[, exp_in_keep, , drop = FALSE]
   }
   
   mat_enduse <- t(apply(eu, c(1, 3), sum)) / 1e6
+  
   if (length(idx_total)) {
     mat_total <- t(apply(hwp$eu_array[, idx_total, , drop = FALSE], c(1, 3), sum)) / 1e6
-    pre_mask <- years <= 1951
-    zero_rows <- rowSums(mat_enduse, na.rm = TRUE) == 0
+    pre_mask        <- years <= 1951
+    zero_rows       <- rowSums(mat_enduse, na.rm = TRUE) == 0
     rows_to_replace <- pre_mask & zero_rows
-    if (any(rows_to_replace)) mat_enduse[rows_to_replace, ] <- mat_total[rows_to_replace, ]
+    if (any(rows_to_replace)) {
+      mat_enduse[rows_to_replace, ] <- mat_total[rows_to_replace, ]
+    }
   }
   
-  # ----- EndUseID → bins (unchanged) -----
+  # ----- EndUseID → bins & Aggregation ----- #
   bin_defs <- list(
     "Fuel" = c(1, 48, 95, 142, 197),
     "Furniture" = c(5,20,28,42,52,68,81,84,99,116,121,139,144,155,165,186),
@@ -732,40 +758,56 @@ plot_ann_timber_by_enduse_bins <- function(
       8,17,29,39,54,70,75,90,103,111,123,138,147,158,175,181,
       7,18,34,40,59,67,72,93,101,113,127,140,148,160,167,178
     ),
-    "Residential Repair and Remodeling" = c(9,16,33,38,49,66,74,83,105,110,126,130,143,161,171,187),
-    "Packaging & Shipping" = c(4,22,31,44,50,64,77,92,97,112,119,131,150,157,173,182),
-    "Manufacturing Misc." = c(2,13,30,43,51,60,80,87,106,107,118,136,149,159,166,180),
-    "Other Industrial Products" = c(35,82,129,176),
-    "Rail"  = c(3,19,25,41,53,63,71,89,96,117,122,137,153,163,172,177),
-    "Paper" = c(47,94,141,188),
-    "Softwood Misc." = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
-    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209),
-    "Other, N.A." = c(6,23,32,45,55,61,76,88,98,109,120,135,151,156,174,179)
+    "Residential Repair and Remodeling"    = c(9,16,33,38,49,66,74,83,105,110,126,130,143,161,171,187),
+    "Wood Packaging & Shipping"            = c(4,22,31,44,50,64,77,92,97,112,119,131,150,157,173,182),
+    "Manufacturing Misc."                  = c(2,13,30,43,51,60,80,87,106,107,118,136,149,159,166,180),
+    "Other Industrial Products"            = c(35,82,129,176),
+    "Rail"                                 = c(3,19,25,41,53,63,71,89,96,117,122,137,153,163,172,177),
+    "Paper Products"                       = c(47,94,141,188),
+    "Softwood Misc."                       = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
+    "Hardwood Misc."                       = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209),
+    "Other, N.A."                          = c(6,23,32,45,55,61,76,88,98,109,120,135,151,156,174,179)
   )
   
-  n_ids <- ncol(mat_enduse); if (is.null(n_ids)) n_ids <- 0
+  n_ids <- ncol(mat_enduse)
+  if (is.null(n_ids)) n_ids <- 0
   if (n_ids == 0) stop("eu_array appears empty or has unexpected dimensions.")
   
   id_to_cat <- rep(NA_character_, n_ids)
   for (cat in names(bin_defs)) {
     ids  <- intersect(bin_defs[[cat]], seq_len(n_ids))
+    if (!length(ids)) next
     free <- ids[is.na(id_to_cat[ids])]
-    id_to_cat[free] <- if (cat == "Other, N.A.") "Other" else cat
+    if (!length(free)) next
+    
+    if (cat %in% c("Other, N.A.", "Softwood Misc.", "Hardwood Misc.", "Rail")) {
+      id_to_cat[free] <- "Other"
+    } else {
+      id_to_cat[free] <- cat
+    }
   }
-  keep_cols <- which(!is.na(id_to_cat))
-  id_to_cat <- id_to_cat[keep_cols]
+  
+  keep_cols  <- which(!is.na(id_to_cat))
+  if (!length(keep_cols)) stop("No EndUse IDs matched any bins.")
+  
+  id_to_cat  <- id_to_cat[keep_cols]
   mat_enduse <- mat_enduse[, keep_cols, drop = FALSE]
   
-  present <- unique(id_to_cat)
-  cat_mat <- sapply(present, function(cat) {
+  present_cats <- unique(id_to_cat)
+  cat_mat <- sapply(present_cats, function(cat) {
     cols <- which(id_to_cat == cat)
     rowSums(mat_enduse[, cols, drop = FALSE], na.rm = TRUE)
   })
-  cat_mat <- as.matrix(cat_mat); rownames(cat_mat) <- years
   
-  df <- as.data.frame(cat_mat); df$Year <- years
+  cat_mat <- as.matrix(cat_mat)
+  rownames(cat_mat) <- years
+  
+  df <- as.data.frame(cat_mat)
+  df$Year <- years
+  
   long <- tidyr::pivot_longer(df, -Year, names_to = "Category", values_to = "Value")
   
+  # cumulative option
   if (summary == "cumulative") {
     long <- long |>
       dplyr::group_by(Category) |>
@@ -773,105 +815,173 @@ plot_ann_timber_by_enduse_bins <- function(
       dplyr::ungroup()
   }
   
-  # metric conversion / labels
-  ylab <- "MMT C"
-  if (metric == "CO2e") { long$Value <- long$Value * (44/12); ylab <- expression("MMT C"*O[2]*e) }
-  if (metric == "BBF")  { ylab <- "BBF" }
+  # metric conversion / label
+  ylab <- "Annual HWP Carbon Input\n(MMT C)"
+  if (metric == "CO2e") {
+    long$Value <- long$Value * (44/12)
+    ylab <- expression("MMT C"*O[2]*e)
+  }
+  if (metric == "BBF") {
+    ylab <- "BBF"
+  }
   
-  # totals & axis
-  df_total <- long |>
+  # ---------- Data prep & REVERSED STACKING ORDER ---------- #
+  plot_levels <- c(
+    "Fuel", "Furniture", "Housing and Construction",
+    "Residential Repair and Remodeling",
+    "Wood Packaging & Shipping", "Manufacturing Misc.",
+    "Other Industrial Products", "Paper Products", "Other"
+  )
+  present_levels <- intersect(plot_levels, unique(as.character(long$Category)))
+  
+  # Complete the grid (all Year × Category combos)
+  long_base <- long |>
+    tidyr::complete(Year, Category = present_levels, fill = list(Value = 0)) |>
+    dplyr::filter(Category %in% present_levels)
+  
+  # Use *reversed* order for stacking (bottom → top)
+  stack_levels <- rev(present_levels)
+  
+  long_stacked <- long_base |>
+    dplyr::mutate(Category_stack = factor(Category, levels = stack_levels)) |>
+    dplyr::arrange(Year, Category_stack) |>
+    dplyr::group_by(Year) |>
+    dplyr::mutate(
+      ymax = cumsum(Value),
+      ymin = ymax - Value
+    ) |>
+    dplyr::ungroup() |>
+    # For aesthetics & legend we keep the original (non-reversed) order:
+    dplyr::mutate(Category = factor(Category, levels = present_levels))
+  
+  # Small epsilon to keep ribbons visually connected when a band hits zero
+  epsilon <- 1e-4
+  idx_zero <- abs(long_stacked$ymax - long_stacked$ymin) < epsilon
+  long_stacked$ymax[idx_zero] <- long_stacked$ymin[idx_zero] + epsilon
+  
+  # totals & axis env (use stacked data for axis limits)
+  df_total <- long_stacked |>
     dplyr::group_by(Year) |>
     dplyr::summarise(Total = sum(Value, na.rm = TRUE), .groups = "drop")
   
-  yr_env <- long |>
-    dplyr::group_by(Year) |>
-    dplyr::summarise(pos = sum(pmax(Value, 0), na.rm = TRUE),
-                     neg = sum(pmin(Value, 0), na.rm = TRUE), .groups = "drop")
-  ax <- .axis_pretty_local(c(yr_env$pos, yr_env$neg), positive_only = FALSE)
+  ax <- .axis_pretty_local(c(long_stacked$ymax, long_stacked$ymin), positive_only = FALSE)
   
-  # split for transparent areas; keep FULL totals for the line
-  long_pre   <- subset(long,  Year <  cut_year)
-  long_post  <- subset(long,  Year >= cut_year)
-  df_total_line <- df_total             # <-- full time series for the line
-  
-  # palette/order
-  plot_levels <- c(
-    "Fuel","Furniture","Housing and Construction","Residential Repair and Remodeling",
-    "Packaging & Shipping","Manufacturing Misc.","Other Industrial Products","Rail","Paper",
-    "Softwood Misc.","Hardwood Misc.","Other"
-  )
+  # Palette definitions
   pal_cat <- c(
-    "Fuel"="#EE7733","Furniture"="#0077BB","Housing and Construction"="#009988",
-    "Residential Repair and Remodeling"="#6A3D9A","Packaging & Shipping"="#33BBEE",
-    "Manufacturing Misc."="#EE3377","Other Industrial Products"="#CC3311","Rail"="#228833",
-    "Paper"="#CCBB44","Softwood Misc."="#332288","Hardwood Misc."="#AA4499","Other"="#999933"
+    "Fuel"                              = "#F4D7A1",
+    "Furniture"                         = "#E2B880",
+    "Housing and Construction"          = "#D1965E",
+    "Residential Repair and Remodeling" = "#B6763E",
+    "Wood Packaging & Shipping"         = "#995521",
+    "Manufacturing Misc."               = "#7B3A14",
+    "Other Industrial Products"         = "#5C260C",
+    "Paper Products"                    = "#3F1807",
+    "Other"                             = "#1F0C03"
   )
-  present_levels <- intersect(plot_levels, unique(long$Category))
-  long$Category      <- factor(long$Category,      levels = present_levels)
-  long_pre$Category  <- factor(long_pre$Category,  levels = present_levels)
-  long_post$Category <- factor(long_post$Category, levels = present_levels)
   
+  pat_cat <- c(
+    "Fuel"                              = "none",
+    "Furniture"                         = "circle",
+    "Housing and Construction"          = "stripe",
+    "Residential Repair and Remodeling" = "none",
+    "Wood Packaging & Shipping"         = "circle",
+    "Manufacturing Misc."               = "stripe",
+    "Other Industrial Products"         = "none",
+    "Paper Products"                    = "crosshatch",
+    "Other"                             = "stripe"
+  )
+  
+  pal_present <- pal_cat[present_levels]
+  pat_present <- pat_cat[present_levels]
+  pat_present[is.na(pat_present)] <- "none"
+  
+  # ---- Plotting ----
   if (mode %in% c("category","category_total")) {
+    
     p <- ggplot2::ggplot() +
-      ggplot2::geom_area(data = long_pre,
-                         ggplot2::aes(Year, Value, fill = Category),
-                         alpha = 0, color = NA) +
-      ggplot2::geom_area(data = long_post,
-                         ggplot2::aes(Year, Value, fill = Category),
-                         alpha = 0.85, color = "white", linewidth = 0.2) +
+      ggpattern::geom_ribbon_pattern(
+        data = long_stacked,
+        ggplot2::aes(
+          x       = Year,
+          ymin    = ymin,
+          ymax    = ymax,
+          fill    = Category,
+          pattern = Category
+        ),
+        pattern_fill    = "black",
+        pattern_colour  = "black",
+        pattern_alpha   = 0.8,
+        pattern_density = 0.1,
+        pattern_spacing = 0.02,
+        alpha           = 0.85,
+        color           = "black",
+        linewidth       = 0.2
+      ) +
       ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
-      ggplot2::scale_fill_manual(values = pal_cat[present_levels],
-                                 breaks = present_levels,
-                                 name   = "Product category") +
-      ggplot2::scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
-                                  limits = c(ax$min, ax$max), expand = c(0, 0)) +
-      ggplot2::scale_x_continuous(limits = c(min(years, na.rm=TRUE), max(years, na.rm=TRUE))) +
+      ggplot2::scale_fill_manual(
+        values = pal_present,
+        breaks = present_levels
+      ) +
+      ggpattern::scale_pattern_manual(
+        values = pat_present,
+        breaks = present_levels
+      ) +
+      ggplot2::scale_y_continuous(
+        breaks = seq(ax$min, ax$max, by = ax$by),
+        limits = c(ax$min, ax$max),
+        expand = c(0, 0)
+      ) +
+      ggplot2::scale_x_continuous(
+        limits = c(min(years, na.rm = TRUE), max(years, na.rm = TRUE))
+      ) +
       ggplot2::labs(
         x = "Harvest Year",
         y = ylab,
-        title = paste0(if (summary == "cumulative") "Cumulative" else "Annual",
-                       " C influx by product category")
+        title = paste0(
+          if (summary == "cumulative") "Cumulative" else "Annual",
+          " C influx by product category"
+        )
       ) +
-      ggplot2::theme_bw(base_size = 14) +
-      ggplot2::theme(legend.position = "right")
+      common_theme
     
-    if (mode == "category_total") {
-      p <- p +
-        ggplot2::geom_line(data = df_total_line,                 # <-- FULL series here
-                           ggplot2::aes(Year, Total, color = "Total"),
-                           linewidth = 0.9, inherit.aes = FALSE) +
-        ggplot2::scale_color_manual(values = c(Total = "black"), name = NULL)
-    }
     return(p)
   }
   
-  # mode == "total" (FULL series)
-  ggplot2::ggplot(df_total, ggplot2::aes(Year, Total)) +        # <-- FULL series here
+  # mode == "total"
+  ggplot2::ggplot(df_total, ggplot2::aes(Year, Total)) +
     ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
     ggplot2::geom_line(linewidth = 1.0) +
-    ggplot2::scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
-                                limits = c(ax$min, ax$max), expand = c(0, 0)) +
-    ggplot2::scale_x_continuous(limits = c(min(years, na.rm=TRUE), max(years, na.rm=TRUE))) +
+    ggplot2::scale_y_continuous(
+      breaks = seq(ax$min, ax$max, by = ax$by),
+      limits = c(ax$min, ax$max),
+      expand = c(0, 0)
+    ) +
+    ggplot2::scale_x_continuous(
+      limits = c(min(years, na.rm = TRUE), max(years, na.rm = TRUE))
+    ) +
     ggplot2::labs(
       x = "Harvest Year",
       y = ylab,
-      title = paste0(if (summary == "cumulative") "Cumulative" else "Annual",
-                     " C influx (total)")
+      title = paste0(
+        if (summary == "cumulative") "Cumulative" else "Annual",
+        " C influx (total)"
+      )
     ) +
-    ggplot2::theme_bw(base_size = 14)
+    common_theme
 }
 
 
-
 # Example call
-# Annual C influx by product category (stacked area) with total line, 2001+ visible
 p_cat <- plot_ann_timber_by_enduse_bins(
   hwp,
-  metric  = "MMTC",        # or "CO2e"
-  summary = "annual",      # or "cumulative"
-  mode    = "category_total"  # or "category", "total"
+  metric  = "MMTC",
+  summary = "annual",
+  mode    = "category_total"
 )
 print(p_cat)
+
+
+
 
 
 
@@ -881,9 +991,11 @@ print(p_cat)
 #    metric: "MMTC" | "CO2e" | "BBF"
 #    summary: "annual" | "cumulative"
 #    mode: "ownership_total" (stack owners + total line),
-#          "ownership" (stack owners only),
-#          "total" (total line only)
-# Includes safe Exports derivation!
+#          "ownership"       (stack owners only),
+#          "total"           (total line only)
+# Uses ggpattern + manual stacking (no white gaps).
+# Positive stacks are in REVERSED ownership order,
+# legend order stays Imports → ... → Exports.
 # =========================================================
 
 plot_ann_timber_harvest <- function(hwp,
@@ -892,9 +1004,32 @@ plot_ann_timber_harvest <- function(hwp,
                                     mode    = c("ownership_total","ownership","total"),
                                     ownership_start_year = NULL,
                                     trade_start_year     = NULL) {
+  
   metric  <- match.arg(metric)
   summary <- match.arg(summary)
   mode    <- match.arg(mode)
+  
+  # ---- Theme (internal) ----
+  common_theme <- ggplot2::theme_bw(base_size = 14) +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.title = ggplot2::element_text(size = 38),
+      axis.text  = ggplot2::element_text(size = 28),
+      panel.border = ggplot2::element_rect(color = "grey60", fill = NA, linewidth = 0.6),
+      plot.background = ggplot2::element_rect(fill = "white", color = NA),
+      panel.spacing = grid::unit(1, "lines"),
+      legend.position = "top",
+      legend.justification = "center",
+      legend.box.just = "center",
+      legend.box = "horizontal",     # one-row legends
+      legend.title = ggplot2::element_blank(),
+      legend.text  = ggplot2::element_text(size = 26),
+      legend.key.size = grid::unit(22, "pt"),
+      legend.key.width = grid::unit(25, "pt"),
+      legend.box.margin = ggplot2::margin(8, 10, 0, 10),
+      legend.spacing.x = grid::unit(14, "pt"),
+      plot.margin = ggplot2::margin(22, 18, 10, 14)
+    )
   
   years    <- .get_years(hwp)
   owns_raw <- .get_ownerships(hwp)
@@ -902,12 +1037,13 @@ plot_ann_timber_harvest <- function(hwp,
   # Labels & ordering
   owns_lab          <- gsub("\\.", " ", owns_raw)
   owns_lab_no_total <- setdiff(owns_lab, "Total")
-  presplit_name <- "All ownerships (pre-1952)"
-  base_order    <- c("Imports","BLM","USFS","State","Private and Tribal", presplit_name, "Exports")
-  legend_order  <- intersect(base_order, c(owns_lab_no_total, presplit_name))
+  presplit_name     <- "All ownerships (pre-1952)"
+  
+  base_order   <- c("Imports","BLM","USFS","State","Private and Tribal", presplit_name, "Exports")
+  legend_order <- intersect(base_order, c(owns_lab_no_total, presplit_name))
   
   # ---- Build ownership matrix as NUMERIC MATRIX (MMT C) ----
-  mat <- t(apply(hwp$eu_array, c(2,3), sum)) / 1e6   # [year, owner]
+  mat <- t(apply(hwp$eu_array, c(2,3), sum)) / 1e6    # [year, owner]
   colnames(mat) <- owns_lab
   storage.mode(mat) <- "double"
   
@@ -933,6 +1069,7 @@ plot_ann_timber_harvest <- function(hwp,
   } else {
     mat[, "Exports"] <- 0
   }
+  
   if ("Total" %in% colnames(mat)) {
     total_owner <- mat[, "Total"]
     others      <- setdiff(colnames(mat), c("Total","Exports"))
@@ -948,7 +1085,7 @@ plot_ann_timber_harvest <- function(hwp,
   if (!(presplit_name %in% colnames(mat))) {
     presplit_col <- matrix(0, nrow(mat), 1)
     colnames(presplit_col) <- presplit_name
-    mat <- cbind(mat, presplit_col)           # stays a numeric matrix
+    mat <- cbind(mat, presplit_col)            # stays a numeric matrix
   } else {
     mat[, presplit_name] <- as.numeric(mat[, presplit_name])
   }
@@ -964,16 +1101,19 @@ plot_ann_timber_harvest <- function(hwp,
     rowSums(mat[, idx_base, drop = FALSE], na.rm = TRUE)
   }
   
-  remainder     <- pmax(total_for_remainder - sum_known, 0)
-  mask_presplit <- years < own_start
+  remainder      <- pmax(total_for_remainder - sum_known, 0)
+  mask_presplit  <- years < own_start
   mat[mask_presplit, presplit_name] <- remainder[mask_presplit]
   
-  # ---- Long df (drop Total) ----
+  # ---- Long df (drop Total, drop NA ownership) ----
   own_stack <- as.data.frame(mat)
   own_stack$Year <- years
-  own_stack <- tidyr::pivot_longer(own_stack, -Year, names_to = "Ownership", values_to = "Value") |>
-    dplyr::filter(Ownership != "Total")
+  own_stack <- tidyr::pivot_longer(own_stack, -Year,
+                                   names_to = "Ownership",
+                                   values_to = "Value") |>
+    dplyr::filter(!is.na(Ownership), Ownership != "Total")
   
+  # cumulative option
   if (summary == "cumulative") {
     own_stack <- own_stack |>
       dplyr::group_by(Ownership) |>
@@ -983,7 +1123,8 @@ plot_ann_timber_harvest <- function(hwp,
   
   # Exports below zero
   if ("Exports" %in% unique(own_stack$Ownership)) {
-    own_stack$Value[own_stack$Ownership == "Exports"] <- -own_stack$Value[own_stack$Ownership == "Exports"]
+    own_stack$Value[own_stack$Ownership == "Exports"] <-
+      -own_stack$Value[own_stack$Ownership == "Exports"]
   }
   
   # Metric label/convert if CO2e
@@ -993,14 +1134,39 @@ plot_ann_timber_harvest <- function(hwp,
     ylab <- expression("MMT C"*O[2]*e)
   }
   
-  # Split: invisible pre-1952 vs. colored ownerships
+  # Split: pre-1952 band vs. ownerships with categories
   avail_all   <- intersect(legend_order, unique(own_stack$Ownership))
   main_levels <- setdiff(avail_all, presplit_name)
-  df_pre      <- dplyr::filter(own_stack, Ownership == presplit_name)
-  df_main     <- dplyr::filter(own_stack, Ownership != presplit_name)
-  if (nrow(df_main)) df_main$Ownership <- factor(df_main$Ownership, levels = main_levels)
-  pal <- setNames(viridisLite::viridis(length(main_levels), option = "D", end = 0.95, begin = 0.05),
-                  main_levels)
+  
+  df_pre  <- dplyr::filter(own_stack, Ownership == presplit_name)
+  df_main <- dplyr::filter(own_stack, Ownership != presplit_name)
+  
+  # Ensure main Ownership factor for legend/palettes
+  if (nrow(df_main)) {
+    df_main$Ownership <- factor(df_main$Ownership, levels = main_levels)
+  }
+  
+  # ---- CUSTOM OWNERSHIP PALETTE AND PATTERNS ----
+  pal_base <- c(
+    "#DCC7A0", # Imports (light)
+    "#C08A4A", # BLM
+    "#9B5A18", # USFS
+    "#723A10", # State
+    "#4C260B", # Private and Tribal
+    "#2E1507"  # Exports
+  )
+  pal <- setNames(pal_base[seq_along(main_levels)], main_levels)
+  
+  pattern_vec <- c(
+    "Imports"          = "none",
+    "BLM"              = "crosshatch",
+    "USFS"             = "stripe",
+    "State"            = "circle",
+    "Private and Tribal" = "crosshatch",
+    "Exports"          = "none"
+  )
+  pattern_scheme <- pattern_vec[main_levels]
+  pattern_scheme[is.na(pattern_scheme)] <- "none"
   
   # Reconciled total (sum of stack with negatives)
   df_total <- own_stack |>
@@ -1010,62 +1176,164 @@ plot_ann_timber_harvest <- function(hwp,
   # Axis allowing negatives
   yr_env <- own_stack |>
     dplyr::group_by(Year) |>
-    dplyr::summarise(pos = sum(pmax(Value, 0), na.rm = TRUE),
-                     neg = sum(pmin(Value, 0), na.rm = TRUE), .groups = "drop")
+    dplyr::summarise(
+      pos = sum(pmax(Value, 0), na.rm = TRUE),
+      neg = sum(pmin(Value, 0), na.rm = TRUE),
+      .groups = "drop"
+    )
   ax <- .axis_pretty(c(yr_env$pos, yr_env$neg), positive_only = FALSE)
   
-  # Plot
+  # ===== Manual stacking for patterns =====
+  
+  # Split positive vs negative contributions
+  df_pos <- df_main |> dplyr::filter(Value >= 0)
+  df_neg <- df_main |> dplyr::filter(Value <  0)
+  
+  # --- Positive stack: REVERSED order relative to main_levels ---
+  pos_order <- rev(main_levels)  # <- controls visual stacking only
+  if (nrow(df_pos)) {
+    df_pos <- df_pos |>
+      dplyr::mutate(Ownership = factor(Ownership, levels = pos_order)) |>
+      dplyr::arrange(Year, Ownership) |>
+      dplyr::group_by(Year) |>
+      dplyr::mutate(
+        ymax = cumsum(Value),
+        ymin = ymax - Value
+      ) |>
+      dplyr::ungroup()
+  }
+  
+  # --- Negative stack (e.g., Exports) ---
+  if (nrow(df_neg)) {
+    df_neg <- df_neg |>
+      dplyr::mutate(
+        Ownership = factor(Ownership, levels = main_levels),
+        pos = -Value
+      ) |>
+      dplyr::arrange(Year, Ownership) |>
+      dplyr::group_by(Year) |>
+      dplyr::mutate(
+        cum  = cumsum(pos),
+        ymin = -cum,
+        ymax = ymin + pos
+      ) |>
+      dplyr::ungroup()
+  }
+  
+  df_ribbons <- dplyr::bind_rows(df_pos, df_neg)
+  
+  # ---- Plot ----
   if (mode %in% c("ownership","ownership_total")) {
-    p <- ggplot() + geom_hline(yintercept = 0, color = "black", linewidth = 1.0)
     
-    # pre-1952 band: invisible; no legend
+    p <- ggplot2::ggplot() +
+      ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 1.25)
+    
+    # pre-1952 band: invisible (line only)
     if (nrow(df_pre)) {
-      p <- p + geom_area(data = df_pre, aes(Year, Value),
-                         inherit.aes = FALSE, fill = "transparent", color = NA, alpha = 0)
+      p <- p +
+        ggplot2::geom_area(
+          data = df_pre,
+          ggplot2::aes(Year, Value),
+          inherit.aes = FALSE,
+          fill = "transparent",
+          color = NA,
+          alpha = 0
+        )
     }
     
-    # regular ownerships (Imports first level → on top with reverse = FALSE)
-    if (nrow(df_main)) {
-      p <- p + geom_area(data = df_main,
-                         aes(Year, Value, fill = Ownership),
-                         alpha = 0.85, color = "white", linewidth = 0.2,
-                         position = position_stack(reverse = FALSE)) +
-        scale_fill_manual(values = pal, breaks = main_levels, name = "Ownership")
+    # patterned ownership ribbons
+    if (nrow(df_ribbons)) {
+      p <- p +
+        ggpattern::geom_ribbon_pattern(
+          data = df_ribbons,
+          ggplot2::aes(
+            x       = Year,
+            ymin    = ymin,
+            ymax    = ymax,
+            fill    = Ownership,
+            pattern = Ownership
+          ),
+          pattern_fill    = "black",
+          pattern_colour  = "black",
+          pattern_alpha   = 0.8,
+          pattern_density = 0.1,
+          pattern_spacing = 0.02,
+          alpha           = 0.85,
+          color           = "white",
+          linewidth       = 0.2
+        ) +
+        ggplot2::scale_fill_manual(
+          values = pal,
+          breaks = main_levels,
+          name   = "Ownership"
+        ) +
+        ggpattern::scale_pattern_manual(
+          values = pattern_scheme,
+          breaks = main_levels,
+          name   = "Ownership"
+        )
     }
     
     p <- p +
-      scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
-                         limits = c(ax$min, ax$max), expand = c(0, 0)) +
-      labs(x = "Harvest Year", y = ylab,
-           title = paste(summary, "timber harvest",
-                         if (mode == "ownership_total") "by ownership + total" else "by ownership")) +
-      theme_bw(base_size = 14) +
-      theme(legend.position = "right")
+      ggplot2::scale_y_continuous(
+        breaks = seq(ax$min, ax$max, by = ax$by),
+        limits = c(ax$min, ax$max),
+        expand = c(0, 0)
+      ) +
+      ggplot2::labs(
+        x = "Harvest Year",
+        y = ylab,
+        title = paste(
+          summary,
+          "timber harvest",
+          if (mode == "ownership_total") "by ownership + total" else "by ownership"
+        )
+      ) +
+      common_theme
     
     if (mode == "ownership_total") {
       p <- p +
-        geom_line(data = df_total, aes(Year, Total, color = "Total"),
-                  linewidth = 0.7, inherit.aes = FALSE) +
-        scale_color_manual(values = c(Total = "black"), name = NULL)
+        ggplot2::geom_line(
+          data = df_total,
+          ggplot2::aes(Year, Total, color = "Total"),
+          linewidth = 1.25,
+          inherit.aes = FALSE
+        ) +
+        ggplot2::scale_color_manual(values = c(Total = "black"), name = NULL)
     }
+    
     return(p)
-  } else {
-    ggplot(df_total, aes(Year, Total)) +
-      geom_hline(yintercept = 0, color = "black", linewidth = 1.0) +  # <-- add this
-      geom_line(linewidth = 1.0) +
-      scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
-                         limits = c(ax$min, ax$max), expand = c(0, 0)) +
-      labs(x = "Harvest Year", y = ylab, title = paste(summary, "timber harvest (total)")) +
-      theme_bw(base_size = 14)
   }
+  
+  # mode == "total"
+  ggplot2::ggplot(df_total, ggplot2::aes(Year, Total)) +
+    ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 1.0) +
+    ggplot2::geom_line(linewidth = 1.0) +
+    ggplot2::scale_y_continuous(
+      breaks = seq(ax$min, ax$max, by = ax$by),
+      limits = c(ax$min, ax$max),
+      expand = c(0, 0)
+    ) +
+    ggplot2::labs(
+      x = "Harvest Year",
+      y = ylab,
+      title = paste(summary, "timber harvest (total)")
+    ) +
+    common_theme
 }
 
 
-# Plot call
-p1 <- plot_ann_timber_harvest(hwp,
-                              metric="MMTC", summary="annual", mode="ownership_total",
-                              ownership_start_year=1952, trade_start_year=1965)
-print(p1); save_plot_png(p1, "Plot_AnnHarvestandTrade.png")
+# Example call
+p1 <- plot_ann_timber_harvest(
+  hwp,
+  metric  = "MMTC",
+  summary = "annual",
+  mode    = "ownership_total",
+  ownership_start_year = 1952,
+  trade_start_year     = 1965
+)
+print(p1)
+
 
 
 
@@ -1213,15 +1481,22 @@ p2 <- plot_annual_net_change(
   metrictype     = "MMTC",
   include_net_line = TRUE
 )
-print(p2); save_plot_png(p2, "Plot_AnNetChCStor_Production.png")
+print(p2)
 
 # ---- Example: Simple Decay approach with Net line ----
+
+
+
 p2 <- plot_annual_net_change(
   hwp,
-  approach       = "simple_decay",
-  metrictype     = "MMTC",
+  approach         = "simple_decay",
+  metrictype       = "MMTC",
   include_net_line = TRUE
-)
+) +
+  coord_cartesian(ylim = c(-15, 30)) +
+  scale_y_continuous(
+    breaks = scales::pretty_breaks(n = 6)  # optional: nice tick spacing
+  )
 print(p2); save_plot_png(p2, "Plot_AnNetChCStor_SimpleDecay.png")
 
 
@@ -1530,6 +1805,8 @@ p3 <- plot_harvest_by_functional_lifespan(
 print(p3)
 
 
+
+
 # =========================================================
 # 4) Cumulative carbon stored by PRODUCT TYPE (End Use) — MMT C
 # pools: "both" | "piu" | "swds"
@@ -1538,13 +1815,38 @@ print(p3)
 # - Colors are paired: PIU = base, SWDS = lighter shade of the same color.
 # - Expects arrays in metric tonnes C; converts to MMT C.
 # Arrays used from `hwp`: pu.final_array [EndUse, Ownership, Year]
-#                          swdsCtotal_array [EndUse, Ownership, Year]
+#                      swdsCtotal_array [EndUse, Ownership, Year]
 # =========================================================
+
+# ** REQUIRED LIBRARY **
+# library(ggpattern)
+
+# ---- Theme ----
+common_theme <- theme_bw(base_size = 14) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(size = 24),
+    axis.text  = element_text(size = 18),
+    panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.6),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "top",
+    legend.justification = "center",
+    legend.box.just = "center",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 16),
+    legend.key.size = unit(22, "pt"),
+    legend.key.width = unit(25, "pt"),
+    legend.box.margin = margin(8, 10, 0, 10),
+    legend.spacing.x = unit(14, "pt"),
+    plot.margin = margin(22, 18, 10, 14)
+  )
 
 plot_carbon_storage_by_product_category <- function(
     hwp,
-    pools        = c("both","piu","swds"),
-    metric       = c("MMTC","CO2e")
+    pools  = c("both","piu","swds"),
+    metric = c("MMTC","CO2e")
 ) {
   pools  <- match.arg(pools)
   metric <- match.arg(metric)
@@ -1555,42 +1857,51 @@ plot_carbon_storage_by_product_category <- function(
   if (is.null(pu) || is.null(swds))
     stop("hwp$pu.final_array and hwp$swdsCtotal_array are required.")
   
-  years <- hwp$years
-  if (is.null(years)) {
-    years <- as.numeric(dimnames(pu)[[3]])
-    if (is.null(years)) stop("hwp$years is required (or set in array dimnames).")
-  }
+  # ---- years: use the same helper as other plotting fns ----
+  years <- .get_years(hwp)
   
-  # ---- helper: take TOTAL owner if present; else sum owners ----
+  # helper to clean ownership names
   clean <- function(x) gsub("\\.", " ", trimws(x))
+  
+  # Sum over ownership; prefer 'Total' if present
   sum_total_or_owners <- function(arr) {
     own <- clean(dimnames(arr)[[2]])
     idx_total <- which(own == "Total")
-    # EU x Year in metric tonnes C
     mat <- if (length(idx_total)) {
+      # [EndUseID, Year]
       apply(arr[, idx_total, , drop = FALSE], c(1, 3), sum, na.rm = TRUE)
     } else {
-      apply(arr, c(1, 3), sum, na.rm = TRUE)  # sum across all owners
+      apply(arr, c(1, 3), sum, na.rm = TRUE)
     }
-    mat / 1e6  # -> MMT C
+    mat / 1e6
   }
   
-  eu_piu  <- sum_total_or_owners(pu)   # [EndUse x Year] MMT C
-  eu_swds <- sum_total_or_owners(swds) # [EndUse x Year] MMT C
+  eu_piu  <- sum_total_or_owners(pu)    # [EndUseID, Year]
+  eu_swds <- sum_total_or_owners(swds)  # [EndUseID, Year]
   
-  # choose pool(s)
-  eu_year <- switch(pools,
-                    piu  = eu_piu,
-                    swds = eu_swds,
-                    both = eu_piu + eu_swds)
+  # ---- Combine pools if requested ----
+  eu_year <- switch(
+    pools,
+    piu  = eu_piu,
+    swds = eu_swds,
+    both = eu_piu + eu_swds
+  )
   
-  n_eu <- nrow(eu_year)
+  # Align years length with number of time steps if needed
+  if (length(years) != ncol(eu_year)) {
+    if (length(years) > ncol(eu_year)) {
+      years <- years[seq_len(ncol(eu_year))]
+    } else {
+      stop("Length of 'years' does not match number of time steps in eu_year.")
+    }
+  }
   
-  # ---- EndUseID -> product category bins (first match wins) ----
+  # ---- bins (Fuel, Rail, Softwood/Hardwood Misc. removed) ----
+  n_eu  <- nrow(eu_year)         # number of EndUse IDs available
   clamp <- function(v) intersect(v, seq_len(n_eu))
+  
   bin_defs <- list(
-    "Fuel" = c(1, 48, 95, 142, 197),
-    "Furniture" = c(5, 20, 28, 42, 52, 68, 81, 84, 99, 116, 121, 139, 144, 155, 165, 186),
+    "Furniture" = c(5,20,28,42,52,68,81,84,99,116,121,139,144,155,165,186),
     "Housing and Construction" = c(
       10,21,27,36,57,65,73,91,104,115,125,132,145,164,170,183,
       12,14,24,37,56,69,78,86,100,108,128,134,146,162,169,184,
@@ -1599,95 +1910,122 @@ plot_carbon_storage_by_product_category <- function(
       7,18,34,40,59,67,72,93,101,113,127,140,148,160,167,178
     ),
     "Residential Repair and Remodeling" = c(9,16,33,38,49,66,74,83,105,110,126,130,143,161,171,187),
-    "Packaging & Shipping" = c(4,22,31,44,50,64,77,92,97,112,119,131,150,157,173,182),
+    "Wood Packaging & Shipping" = c(4,22,31,44,50,64,77,92,97,112,119,131,150,157,173,182),
     "Manufacturing Misc." = c(2,13,30,43,51,60,80,87,106,107,118,136,149,159,166,180),
     "Other Industrial Products" = c(35,82,129,176),
-    "Rail" = c(3,19,25,41,53,63,71,89,96,117,122,137,153,163,172,177),
-    "Paper" = c(47,94,141,188),
-    "Softwood Misc." = c(206,204,216,222,208,198,220,194,212,214,200,192,190,196,218,224,202,210),
-    "Hardwood Misc." = c(205,203,215,221,207,197,219,193,211,213,199,191,189,195,217,223,201,209),
+    "Paper Products" = c(47,94,141,188),
     "Other" = c(6,23,32,45,55,61,76,88,98,109,120,135,151,156,174,179)
   )
+  
   bin_defs <- lapply(bin_defs, clamp)
   bin_defs <- bin_defs[vapply(bin_defs, length, 1L) > 0]
-  if (!length(bin_defs)) stop("No EndUse IDs matched the arrays' EndUse dimension.")
+  if (!length(bin_defs)) stop("No EndUse IDs matched.")
   
-  # ---- aggregate to product categories (Year-wise) ----
   cat_mat <- sapply(names(bin_defs), function(cat) {
-    ids <- bin_defs[[cat]]
-    colSums(eu_year[ids, , drop = FALSE], na.rm = TRUE)  # vector per Year
+    colSums(eu_year[bin_defs[[cat]], , drop = FALSE], na.rm = TRUE)
   })
-  cat_df <- as.data.frame(cat_mat)
+  
+  cat_df      <- as.data.frame(cat_mat)
   cat_df$Year <- years
   long <- tidyr::pivot_longer(cat_df, -Year, names_to = "Category", values_to = "Value")
   
-  # ---- units ----
-  ylab <- "MMT C"
-  if (metric == "CO2e") { long$Value <- long$Value * (44/12); ylab <- expression("MMT C"*O[2]*e) }
+  # ---- metric ----
+  ylab <- "HWP Carbon Stock (MMT C)"
+  if (metric == "CO2e") {
+    long$Value <- long$Value * (44/12)
+    ylab <- expression("MMT C"*O[2]*e)
+  }
   
-  # ---- axis ----
   axis_pretty <- function(x) {
     x <- x[is.finite(x)]
-    if (!length(x)) return(list(min = 0, max = 1, by = 0.2))
     br <- pretty(range(x, na.rm = TRUE))
     list(min = min(br), max = max(br), by = diff(br)[1])
   }
+  
   ax <- long |>
     dplyr::group_by(Year) |>
     dplyr::summarise(Tot = sum(Value, na.rm = TRUE), .groups = "drop") |>
     dplyr::pull(Tot) |>
     axis_pretty()
   
-  # ---- palette & order ----
   plot_levels <- c(
-    "Fuel","Furniture","Housing and Construction","Residential Repair and Remodeling",
-    "Packaging & Shipping","Manufacturing Misc.","Other Industrial Products","Rail","Paper",
-    "Softwood Misc.","Hardwood Misc.","Other"
+    "Furniture","Housing and Construction","Residential Repair and Remodeling",
+    "Wood Packaging & Shipping","Manufacturing Misc.","Other Industrial Products",
+    "Paper Products","Other"
   )
+  
+  # --- Colors ---
   pal_cat <- c(
-    "Fuel"                               = "#EE7733",
-    "Furniture"                          = "#0077BB",
-    "Housing and Construction"           = "#009988",
-    "Residential Repair and Remodeling"  = "#6A3D9A",
-    "Packaging & Shipping"               = "#33BBEE",
-    "Manufacturing Misc."                = "#EE3377",
-    "Other Industrial Products"          = "#CC3311",
-    "Rail"                               = "#228833",
-    "Paper"                              = "#CCBB44",
-    "Softwood Misc."                     = "#332288",
-    "Hardwood Misc."                     = "#AA4499",
-    "Other"                              = "#999933"
+    "Furniture"                         = "#D8C097",
+    "Housing and Construction"          = "#C99A6C",
+    "Residential Repair and Remodeling" = "#BA7A44",
+    "Wood Packaging & Shipping"         = "#A25B24",
+    "Manufacturing Misc."               = "#8A4415",
+    "Other Industrial Products"         = "#753411",
+    "Paper Products"                    = "#5F280D",
+    "Other"                             = "#3A1708"
   )
+  
+  # --- Patterns ---
+  pat_cat <- c(
+    "Furniture"                         = "crosshatch",
+    "Housing and Construction"          = "circle",
+    "Residential Repair and Remodeling" = "none",
+    "Wood Packaging & Shipping"         = "stripe",
+    "Manufacturing Misc."               = "crosshatch",
+    "Other Industrial Products"         = "circle",
+    "Paper Products"                    = "none",
+    "Other"                             = "stripe"
+  )
+  
   present <- intersect(plot_levels, unique(long$Category))
   long$Category <- factor(long$Category, levels = present)
   
+  pal_present <- pal_cat[present]
+  pat_present <- pat_cat[present]
+  
   ggplot2::ggplot(long, ggplot2::aes(Year, Value, fill = Category)) +
-    ggplot2::geom_area(alpha = 0.9, color = "white", linewidth = 0.25) +
+    ggpattern::geom_area_pattern(
+      ggplot2::aes(pattern = Category),
+      pattern_fill    = "black",
+      pattern_colour  = "black",
+      pattern_alpha   = 0.8,
+      pattern_density = 0.1,
+      pattern_spacing = 0.02,
+      alpha           = 0.9,
+      color           = "black",
+      linewidth       = 0.25
+    ) +
     ggplot2::geom_hline(yintercept = 0, color = "black", linewidth = 0.6) +
-    ggplot2::scale_fill_manual(values = pal_cat[present], breaks = present, name = "Product category") +
-    ggplot2::scale_y_continuous(breaks = seq(ax$min, ax$max, by = ax$by),
-                                limits = c(ax$min, ax$max), expand = c(0, 0)) +
+    ggplot2::scale_fill_manual(values = pal_present, breaks = present) +
+    ggpattern::scale_pattern_manual(values = pat_present, breaks = present) +
+    ggplot2::scale_y_continuous(
+      breaks = seq(ax$min, ax$max, by = ax$by),
+      limits = c(ax$min, ax$max),
+      expand = c(0, 0)
+    ) +
     ggplot2::labs(
       x = "Harvest Year",
       y = ylab,
-      title = paste0("Cumulative carbon stored in ",
-                     if (pools == "piu") "PIU"
-                     else if (pools == "swds") "SWDS"
-                     else "PIU and SWDS",
-                     " by product category")
+      title = paste0(
+        "Cumulative carbon stored in ",
+        if (pools == "piu") "PIU"
+        else if (pools == "swds") "SWDS"
+        else "PIU and SWDS",
+        " by product category"
+      )
     ) +
-    ggplot2::theme_bw(base_size = 14) +
-    ggplot2::theme(legend.position = "bottom")
+    common_theme
 }
+
 
 # ---- Your call (unchanged) ----
 p4 <- plot_carbon_storage_by_product_category(
   hwp,
-  pools  = "both",  # or "piu", "swds"
+  pools  = "both",
   metric = "MMTC"
 )
 print(p4)
-
 
 
 # =========================================================
@@ -1699,6 +2037,28 @@ print(p4)
 #  • Simple-decay: integrates (Domestic + Imports − Exports) − (EEC + EWOEC).
 #    If pool-level simple-decay stocks aren't available, splits the total
 #    using the Production pool shares for that year.
+
+# ---- Theme ----
+common_theme <- theme_bw(base_size = 14) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(size = 24),
+    axis.text  = element_text(size = 18),
+    panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.6),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "top",
+    legend.justification = "center",
+    legend.box.just = "center",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 16),
+    legend.key.size = unit(22, "pt"),
+    legend.key.width = unit(25, "pt"),
+    legend.box.margin = margin(8, 10, 0, 10),
+    legend.spacing.x = unit(14, "pt"),
+    plot.margin = margin(22, 18, 10, 14)
+  )
 
 .axis_pretty <- function(x, n = 6) {
   x <- x[is.finite(x)]
@@ -1746,7 +2106,7 @@ plot_cumulative_stocks_by_pool <- function(
     hwp,
     metric             = c("MMTC","CO2e"),
     include_total_line = TRUE,
-    y_min = NA,    # optional fixed y-limits; leave NA to auto-compute
+    y_min = NA,
     y_max = NA
 ) {
   metric <- match.arg(metric)
@@ -1762,9 +2122,18 @@ plot_cumulative_stocks_by_pool <- function(
   
   # Metric conversion
   if (metric == "CO2e") {
-    df[c("PIU","SWDS","Total")] <- lapply(df[c("PIU","SWDS","Total")], function(v) v * (44/12))
+    df[c("PIU","SWDS","Total")] <- lapply(
+      df[c("PIU","SWDS","Total")],
+      function(v) v * (44/12)
+    )
   }
-  ylab <- if (metric == "CO2e") expression("MMT CO"[2]*"e") else "MMT C"
+  
+  # Updated y-axis title
+  ylab <- if (metric == "CO2e") {
+    "HWP Carbon Stock (MMT CO2e)"
+  } else {
+    "HWP Carbon Stock (MMT C)"
+  }
   
   # Axis
   if (is.na(y_min) || is.na(y_max)) {
@@ -1781,26 +2150,25 @@ plot_cumulative_stocks_by_pool <- function(
   p <- ggplot2::ggplot(long, ggplot2::aes(Year, Value, fill = pool)) +
     ggplot2::geom_area(color = "black", linewidth = 0.2, alpha = 0.95) +
     ggplot2::scale_fill_manual(
-      values = c("Products in Use" = "#6F00A8", "Solid Waste Disposal Sites" = "#C6508F")
+      values = c(
+        "Products in Use"            = "#C99A6C",
+        "Solid Waste Disposal Sites" = "#5F280D"
+      )
     ) +
-    ggplot2::scale_y_continuous(limits = c(y_min, y_max), expand = c(0, 0)) +
+    ggplot2::scale_y_continuous(
+      limits = c(y_min, y_max),
+      expand = c(0, 0)
+    ) +
     ggplot2::labs(
-      x = "Year", y = ylab,
+      x     = "Year",
+      y     = ylab,
       title = "Cumulative carbon stocks by pool — Production approach"
     ) +
-    ggplot2::theme_bw(base_size = 14) +
-    ggplot2::theme(legend.title = ggplot2::element_blank())
+    common_theme
   
-  if (isTRUE(include_total_line)) {
-    p <- p +
-      ggplot2::geom_line(
-        data = df, ggplot2::aes(Year, Total, color = "Total"),
-        linewidth = 0.8, inherit.aes = FALSE
-      ) +
-      ggplot2::scale_color_manual(values = c(Total = "black"), name = NULL)
-  }
   p
 }
+
 
 # =========================================================
 # B) Cumulative simple-decay accounting
@@ -1905,7 +2273,7 @@ plot_cumulative_simple_decay <- function(
   
   # ---- hard axis limits ----
   pos_max   <- max(pos_df$Value, 0, na.rm = TRUE)
-  y_lo <- y_min                      # <- force this value
+  y_lo <- y_min
   y_hi <- if (is.null(y_max)) max(pos_max, 0) else y_max
   y_breaks <- pretty(c(y_lo, y_hi), n = 7)
   
@@ -1929,10 +2297,10 @@ plot_cumulative_simple_decay <- function(
     ggplot2::scale_y_continuous(limits = c(y_lo, y_hi),
                                 breaks = y_breaks,
                                 expand = c(0, 0)) +
-    ggplot2::coord_cartesian(ylim = c(y_lo, y_hi), expand = FALSE, clip = "on") +  # <- belt & suspenders
+    ggplot2::coord_cartesian(ylim = c(y_lo, y_hi), expand = FALSE, clip = "on") +
     ggplot2::labs(x = "Year", y = ylab,
                   title = "Cumulative carbon accounting — Simple-decay approach") +
-    ggplot2::theme_bw(base_size = 14)
+    common_theme
   
   if (isTRUE(show_eec_outlines)) {
     p <- p +
@@ -1956,21 +2324,18 @@ plot_cumulative_simple_decay <- function(
   p
 }
 
-
 # =========================
 # Example usage
 # =========================
-# Production approach
 p_prod <- plot_cumulative_stocks_by_pool(hwp, metric = "MMTC", include_total_line = TRUE)
 print(p_prod)
 
-# Simple-decay cumulative (force axis if desired)
 p_sd <- plot_cumulative_simple_decay(
   hwp,
   metric = "MMTC",
   include_net_line = TRUE,
-  y_min = -700,  # negative bound
-  y_max =  1350   # positive bound
+  y_min = -700,
+  y_max = 1350
 )
 print(p_sd)
 
@@ -2362,14 +2727,18 @@ plot_carbon_storage_domestic_vs_imports <- function(
     if (!length(oi)) return(rep(0, dim(arr)[3]))
     as.numeric(apply(arr[, oi, , drop = FALSE], 3, sum, na.rm = TRUE))
   }
+  sum_total_or_all <- function(arr) {
+    odim <- trimws(dimnames(arr)[[2]])
+    jTot <- which(odim == "Total")
+    if (length(jTot)) as.numeric(apply(arr[, jTot, , drop = FALSE], 3, sum, na.rm = TRUE))
+    else              as.numeric(apply(arr, 3, sum, na.rm = TRUE))
+  }
   y_lab <- "MMT C"
   
   # -------- inputs --------
   pu_arr   <- hwp$pu.final_array
   swds_arr <- hwp$swdsCtotal_array
-  if (is.null(pu_arr) || is.null(swds_arr)) {
-    stop("pu.final_array and swdsCtotal_array must be present in `hwp`.")
-  }
+  if (is.null(pu_arr) || is.null(swds_arr)) stop("pu.final_array and swdsCtotal_array must be present in `hwp`.")
   
   years <- hwp$years
   arr_years <- suppressWarnings(as.numeric(dimnames(pu_arr)[[3]]))
@@ -2379,11 +2748,10 @@ plot_carbon_storage_domestic_vs_imports <- function(
   owners_swds <- trimws(if (!is.null(dimnames(swds_arr)[[2]])) dimnames(swds_arr)[[2]] else character())
   common_owners <- intersect(owners_pu, owners_swds)
   
-  # Split to Imports vs Domestic (everything except Imports & Total)
-  imports_tag <- "Imports"
+  imports_tag  <- "Imports"
   domestic_set <- setdiff(common_owners, c("Total", imports_tag))
   
-  # time axis (pad to full range if provided)
+  # x-axis domain
   if (is.null(x_years_full)) {
     if (exists("harv.hwp", inherits = TRUE) && is.data.frame(harv.hwp) && "Year" %in% names(harv.hwp)) {
       x_years_full <- sort(unique(as.numeric(harv.hwp$Year)))
@@ -2395,65 +2763,89 @@ plot_carbon_storage_domestic_vs_imports <- function(
   xmin <- min(x_years_full, na.rm = TRUE)
   xmax <- max(x_years_full, na.rm = TRUE)
   
-  # default masking start
+  # anchor/mask default
   if (is.null(ownership_start_year)) {
     osy <- get0("OWNERSHIP_STARTYEAR", ifnotfound = NA_real_)
     ownership_start_year <- if (is.na(osy)) min(years, na.rm = TRUE) else osy
   }
+  baseline_year <- ownership_start_year - 1L
   
-  # -------- build Domestic / Imports (MMT C) --------
-  # PIU
-  piu_dom <- sum_by_owner_set(pu_arr,   domestic_set) / 1e6
+  # -------- base series (MMT C) --------
+  # Domestic by owner (non-imports), typically valid post-1952
+  piu_dom_post <- sum_by_owner_set(pu_arr,   domestic_set) / 1e6
+  swd_dom_post <- sum_by_owner_set(swds_arr, domestic_set) / 1e6
+  # Imports
   piu_imp <- sum_by_owner_set(pu_arr,   imports_tag)  / 1e6
-  # SWDS
-  swd_dom <- sum_by_owner_set(swds_arr, domestic_set) / 1e6
   swd_imp <- sum_by_owner_set(swds_arr, imports_tag)  / 1e6
+  # Totals
+  piu_tot <- sum_total_or_all(pu_arr)   / 1e6
+  swd_tot <- sum_total_or_all(swds_arr) / 1e6
+  
+  # Pre-1952 Domestic = Total − Imports (per pool), used for both display and baseline
+  piu_dom_pre <- (piu_tot - piu_imp)
+  swd_dom_pre <- (swd_tot - swd_imp)
   
   df <- data.frame(
-    Year           = years,
-    `Domestic_PIU` = piu_dom,
-    `Imports_PIU`  = piu_imp,
-    `Domestic_SWDS`= swd_dom,
-    `Imports_SWDS` = swd_imp,
+    Year            = years,
+    Domestic_PIU    = piu_dom_post,   # will adjust shortly
+    Imports_PIU     = piu_imp,
+    Domestic_SWDS   = swd_dom_post,   # will adjust shortly
+    Imports_SWDS    = swd_imp,
     check.names = FALSE
   )
   
+  # ---- Anchor-and-increment for 1952+ (adds legacy once; no double count) ----
+  if (ownership_start_year %in% df$Year && any(df$Year <= baseline_year)) {
+    i_anchor <- which(df$Year == ownership_start_year)[1]
+    i_base   <- tail(which(df$Year <= baseline_year), 1)
+    
+    base_piu  <- piu_dom_pre[i_base]   # full legacy at 1951
+    base_swds <- swd_dom_pre[i_base]
+    
+    anch_piu  <- df$Domestic_PIU[i_anchor]   # owner-split at 1952
+    anch_swds <- df$Domestic_SWDS[i_anchor]
+    
+    is_post <- df$Year >= ownership_start_year
+    
+    df$Domestic_PIU[is_post]  <- base_piu  + pmax(df$Domestic_PIU[is_post]  - anch_piu,  0)
+    df$Domestic_SWDS[is_post] <- base_swds + pmax(df$Domestic_SWDS[is_post] - anch_swds, 0)
+  }
+  
+  # ---- NEW: Keep Domestic visible pre-1952 (continuous fill) ----
+  pre <- df$Year <= baseline_year
+  df$Domestic_PIU[pre]  <- pmax(piu_dom_pre[pre],  0)
+  df$Domestic_SWDS[pre] <- pmax(swd_dom_pre[pre],  0)
+  
   # pad to x_years_full
-  if (length(setdiff(x_years_full, years))) {
+  if (length(setdiff(x_years_full, df$Year))) {
     df <- merge(data.frame(Year = x_years_full), df, by = "Year", all.x = TRUE, sort = TRUE)
   }
   
-  # mask before start year
-  mask <- df$Year < ownership_start_year
-  df$Domestic_PIU[mask]  <- NA_real_
-  df$Imports_PIU[mask]   <- NA_real_
-  df$Domestic_SWDS[mask] <- NA_real_
-  df$Imports_SWDS[mask]  <- NA_real_
+  # mask ONLY imports before ownership_start_year (Domestic stays visible)
+  mask_imp <- df$Year < ownership_start_year
+  df$Imports_PIU[mask_imp]   <- NA_real_
+  df$Imports_SWDS[mask_imp]  <- NA_real_
   
-  # long format
+  # ---- long format ----
   df_long <- rbind(
     data.frame(Year = df$Year, Owner = "Domestic", series = "Products in Use", Value = df$Domestic_PIU),
     data.frame(Year = df$Year, Owner = "Imports",  series = "Products in Use", Value = df$Imports_PIU),
     data.frame(Year = df$Year, Owner = "Domestic", series = "SWDS",            Value = df$Domestic_SWDS),
     data.frame(Year = df$Year, Owner = "Imports",  series = "SWDS",            Value = df$Imports_SWDS)
   )
-  # drop all-NA rows
   df_long <- df_long[is.finite(df_long$Year) & !is.na(df_long$Value), , drop = FALSE]
   
-  # totals for axis
-  ax <- axis_pretty(
-    aggregate(Value ~ Year, df_long, sum, na.rm = TRUE)$Value
-  )
+  # axis
+  ax <- axis_pretty(aggregate(Value ~ Year, df_long, sum, na.rm = TRUE)$Value)
   
   # colors
-  col_dom <- "#159A74"  # green-ish
-  col_imp <- "#D95F02"  # orange
+  col_dom <- "#159A74"
+  col_imp <- "#D95F02"
   alpha_if <- function(col, a = 0.55) {
     if (requireNamespace("scales", quietly = TRUE)) scales::alpha(col, a) else col
   }
   
   if (pools == "both") {
-    # explicit stacking order: Domestic bottom → Imports top
     fill_levels <- c(
       "Domestic — Products in Use",
       "Domestic — SWDS",
@@ -2462,7 +2854,6 @@ plot_carbon_storage_domestic_vs_imports <- function(
     )
     df_long$fill_key <- factor(interaction(df_long$Owner, df_long$series, sep = " — "),
                                levels = fill_levels)
-    
     col_map <- setNames(
       c(col_dom, alpha_if(col_dom, 0.55), col_imp, alpha_if(col_imp, 0.55)),
       fill_levels
@@ -2476,23 +2867,22 @@ plot_carbon_storage_domestic_vs_imports <- function(
                                     limits = c(ax$min, ax$max), expand = c(0, 0)) +
         ggplot2::scale_x_continuous(breaks = pretty(x_years_full),
                                     limits = c(xmin, xmax), expand = c(0, 0)) +
-        ggplot2::labs(x = "Harvest Year", y = y_lab,
-                      title = "Cumulative carbon stored in PIU and SWDS — Domestic vs Imports") +
+        ggplot2::labs(
+          x = "Harvest Year", y = y_lab,
+          title = paste0(
+            "Cumulative carbon stored in PIU and SWDS — Domestic vs Imports\n",
+            "(Domestic shows pre-", ownership_start_year, " PIU & SWDS and includes legacy once in 1952+)"
+          )
+        ) +
         ggplot2::theme_bw(base_size = 14) +
         ggplot2::theme(legend.position = "bottom")
     )
   }
   
   # single-pool path
-  if (pools == "piu") {
-    df_plot <- subset(df_long, series == "Products in Use")
-  } else {
-    df_plot <- subset(df_long, series == "SWDS")
-  }
-  # order so Imports stacks on top
+  df_plot <- if (pools == "piu") subset(df_long, series == "Products in Use") else subset(df_long, series == "SWDS")
   df_plot$Owner <- factor(df_plot$Owner, levels = c("Domestic","Imports"))
   col_two <- c(Domestic = col_dom, Imports = col_imp)
-  
   ax2 <- axis_pretty(aggregate(Value ~ Year, df_plot, sum, na.rm = TRUE)$Value)
   
   ggplot2::ggplot(df_plot, ggplot2::aes(Year, Value, fill = Owner)) +
@@ -2504,15 +2894,18 @@ plot_carbon_storage_domestic_vs_imports <- function(
                                 limits = c(xmin, xmax), expand = c(0, 0)) +
     ggplot2::labs(
       x = "Harvest Year", y = y_lab,
-      title = paste(
-        "Cumulative carbon stored in",
-        if (pools == "piu") "products in use" else "SWDS",
-        "— Domestic vs Imports"
+      title = paste0(
+        "Cumulative carbon stored in ",
+        if (pools == "piu") "Products in Use" else "SWDS",
+        " — Domestic vs Imports\n",
+        "(Domestic shows pre-", ownership_start_year, " legacy and continues through earlier years)"
       )
     ) +
     ggplot2::theme_bw(base_size = 14) +
     ggplot2::theme(legend.position = "bottom")
 }
+
+
 
 # ---------- Example call ----------
 p_dom_imp <- plot_carbon_storage_domestic_vs_imports(
@@ -2533,15 +2926,30 @@ print(p_dom_imp)
 #    You may pass mc_plot / mc_total / mc_iters explicitly, or keep NULL to pull from `hwp`.
 # =========================================================
 
-# =========================================================
-# Monte Carlo plotting helpers with safe facet labelling
-# - Implements Option B: fill missing C.names (e.g., "Total") with identity labels
-# - Adds a robust labeller so incomplete C.names never break facet strips
-# - Works whether `hwp` is a list or an environment
-# =========================================================
-
-# You can comment out this line if ggplot2 is already loaded.
 suppressWarnings(suppressMessages(require(ggplot2)))
+suppressWarnings(suppressMessages(require(grid)))  # for unit() and margin()
+
+# ---- Theme ----
+common_theme <- theme_bw(base_size = 14) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(size = 24),
+    axis.text  = element_text(size = 18),
+    panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.6),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.spacing = unit(1, "lines"),
+    legend.position = "top",
+    legend.justification = "center",
+    legend.box.just = "center",
+    legend.box = "vertical",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 16),
+    legend.key.size = unit(22, "pt"),
+    legend.key.width = unit(25, "pt"),
+    legend.box.margin = margin(8, 10, 0, 10),
+    legend.spacing.x = unit(14, "pt"),
+    plot.margin = margin(22, 18, 10, 14)
+  )
 
 # Safer `%||%`
 `%||%` <- get0("%||%", inherits = TRUE, ifnotfound = NULL)
@@ -2551,9 +2959,12 @@ if (is.null(`%||%`)) `%||%` <- function(x, y) if (!is.null(x)) x else y
 .hwp_get <- function(h, nm) {
   out <- tryCatch(h[[nm]], error = function(...) NULL)
   if (!is.null(out)) return(out)
-  if (is.environment(h) && exists(nm, envir = h, inherits = FALSE)) return(get(nm, envir = h, inherits = FALSE))
+  if (is.environment(h) && exists(nm, envir = h, inherits = FALSE)) {
+    return(get(nm, envir = h, inherits = FALSE))
+  }
   NULL
 }
+
 .hwp_set <- function(h, nm, val) {
   if (is.environment(h)) assign(nm, val, envir = h) else h[[nm]] <- val
   invisible(h)
@@ -2616,12 +3027,13 @@ ensure_pool_labels <- function(hwp, verbose = TRUE) {
   for (v in c("Year","Means","lci","uci")) if (v %in% names(df)) df[[v]] <- suppressWarnings(as.numeric(df[[v]]))
   df
 }
+
 .std_mc_total <- function(df) {
   df <- as.data.frame(df); nm <- names(df)
   if (!"Year" %in% nm) { cand <- intersect(c("Year","year","YEAR","yr"), nm);   if (length(cand)) names(df)[match(cand[1], nm)] <- "Year" }
   if (!"Mean" %in% nm) { cand <- intersect(c("Mean","Means","mean","avg"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "Mean" }
   if (!"lci"  %in% nm) { cand <- intersect(c("lci","LCI","lwr","lo","lower","ciLCI"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "lci" }
-  if (!"uci"  %in% nm) { cand <- intersect(c("uci","UCI","upr","hi","upper","ciUCI"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "uci" }
+  if (!"uci"  %in% nm) { cand <- intersect(c("uci","UCI","upr","hi","upper","ciUCI"), nm); if (length(cand)) names[df][match(cand[1], nm)] <- "uci" }
   for (v in c("Year","Mean","lci","uci")) if (v %in% names(df)) df[[v]] <- suppressWarnings(as.numeric(df[[v]]))
   df
 }
@@ -2650,7 +3062,9 @@ plot_mc_estimates <- function(
     }
     if (is.environment(container)) {
       for (nm in variants) {
-        if (exists(nm, envir = container, inherits = FALSE)) return(get(nm, envir = container, inherits = FALSE))
+        if (exists(nm, envir = container, inherits = FALSE)) {
+          return(get(nm, envir = container, inherits = FALSE))
+        }
       }
     }
     for (nm in variants) {
@@ -2683,8 +3097,8 @@ plot_mc_estimates <- function(
     std_mc_iters <- function(df) {
       df <- as.data.frame(df); nm <- names(df)
       if (!"iter"%in% nm) { cand <- intersect(c("iter","iteration","Iteration","it"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "iter" }
-      if (!"C"   %in% nm) { cand <- intersect(c("C","value","Value","sum","total","Total"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "C" }
-      if (!"stat"%in% nm) { cand <- intersect(c("stat","Stat","metric","which"), nm); if (length(cand)) names(df)[match(cand[1], nm)] <- "stat" }
+      if (!"C"   %in% nm) { cand <- intersect(c("C","value","Value","sum","total","Total"), nm); if (length(cand)) names[df][match(cand[1], nm)] <- "C" }
+      if (!"stat"%in% nm) { cand <- intersect(c("stat","Stat","metric","which"), nm); if (length(cand)) names[df][match(cand[1], nm)] <- "stat" }
       if ("C" %in% names(df))    df$C    <- suppressWarnings(as.numeric(df$C))
       if ("iter" %in% names(df)) df$iter <- suppressWarnings(as.numeric(df$iter))
       df
@@ -2709,21 +3123,29 @@ plot_mc_estimates <- function(
   # ---- plots
   if (plot.type == "1") {
     ggplot(mc_plot, aes(Year, Means/1e6)) +
-      geom_ribbon(aes(ymin = lci/1e6, ymax = uci/1e6), fill = "grey85") +
+      geom_ribbon(aes(ymin = lci/1e6, ymax = uci/1e6), fill = "grey25") +
       geom_line(color = "yellow") +
       facet_wrap(~ Type.M, labeller = labber) +
-      labs(x = NULL, y = ylab,
-           title = paste0("MC mean (yellow) and ", ci_pct, "% CI (band) — storage & emission pools")) +
-      theme_bw(base_size = 14) +
+      labs(
+        x = NULL,
+        y = ylab,
+        title = paste0("MC mean (yellow) and ", ci_pct, "% CI (band) — storage & emission pools")
+      ) +
+      common_theme +
       theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    
   } else if (plot.type == "2") {
     ggplot(mc_total, aes(Year, Mean)) +
-      geom_ribbon(aes(ymin = lci, ymax = uci), fill = "grey85") +
+      geom_ribbon(aes(ymin = lci, ymax = uci), fill = "grey25") +
       geom_line(color = "yellow") +
-      labs(x = NULL, y = ylab,
-           title = paste0("MC mean (yellow) and ", ci_pct, "% CI (band) — PIU + SWDS")) +
-      theme_bw(base_size = 14)
-  } else {
+      labs(
+        x = NULL,
+        y = ylab,
+        title = paste0("MC mean (yellow) and ", ci_pct, "% CI (band) — PIU + SWDS")
+      ) +
+      common_theme
+    
+  } else {  # plot.type == "3"
     end_yr <- if (!is.null(mc_total) && "Year" %in% names(mc_total)) tail(mc_total$Year, 1L) else NA
     lab_map <- c(
       mean   = "Mean",
@@ -2734,16 +3156,20 @@ plot_mc_estimates <- function(
     mc_iters$facet.labs <- unname(lab_map[as.character(mc_iters$stat)])
     mc_iters$facet.labs[is.na(mc_iters$facet.labs)] <- as.character(mc_iters$stat)
     mc_iters$C <- mc_iters$C / 1e6
+    
     ggplot(mc_iters, aes(iter, C)) +
       geom_line() +
       facet_wrap(~ facet.labs, scales = "free_y") +
       labs(
-        x = "Iterations", y = ylab,
-        title = paste0("Convergence — PIU + SWDS",
-                       if (!is.na(end_yr)) paste0(", ", end_yr) else "",
-                       " (N = ", tryCatch(.hwp_get(hwp, "N.ITER"), error = function(...) NA), ")")
+        x = "Iterations",
+        y = ylab,
+        title = paste0(
+          "Convergence — PIU + SWDS",
+          if (!is.na(end_yr)) paste0(", ", end_yr) else "",
+          " (N = ", tryCatch(.hwp_get(hwp, "N.ITER"), error = function(...) NA), ")"
+        )
       ) +
-      theme_bw(base_size = 14)
+      common_theme
   }
 }
 
@@ -2752,9 +3178,9 @@ plot_mc_estimates <- function(
 # 1) Make sure `hwp$mc_plot` (or totals to fall back to) exist.
 # 2) Run once to fill any missing labels (e.g., "Total"):
 hwp <- ensure_pool_labels(hwp)
+
 # 3) Plot normally:
 p1 <- plot_mc_estimates(hwp, plot.type = "1", metrictype = "TgC"); print(p1)
-print(p1)
 p2 <- plot_mc_estimates(hwp, plot.type = "2", metrictype = "TgC"); print(p2)
 p3 <- plot_mc_estimates(hwp, plot.type = "3", metrictype = "TgC"); print(p3)
 # =========================================================

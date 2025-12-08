@@ -16,16 +16,14 @@
 ###
 ###########################################################################################################
 
-
-
 ###########################################
 ## R libraries
 
 renv::restore()   # Begin here to download appropriate package versions
 
 install.packages("reshape2")
-install.packages("C:/Users/kbrewer/Downloads/chattr_0.3.0.tar.zip", repos = NULL, type = "win.binary")
-
+install.packages("C:/Users/kbrewer/Downloads/chattr_0.3.0.tar.zip", 
+                 repos = NULL, type = "win.binary")
 
 # Loading libraries
 library(tidyverse)
@@ -36,22 +34,19 @@ library(abind)      # Combine matrices into an array
 library(triangle)   # for generating random variables from triangular distributions for the Monte Carlo
 library(lhs)        # Latin Hypercube Sampling
 library(networkD3)   # Sankey diagram
-
 library(usethis)
-
-
 
 ##########################################################################
 ###  Constants specific to the stand-alone version of the model
 GENERATE.SANKEY <- TRUE       # Set to FALSE if you do not want the code to generate a Sankey diagram.
 SANKEY.HARVEST.YEAR <- 1995   # Set to any year within your data range.
-QSANKEY.YEARS.OF.DECAY <- 3    # Set to any number between 3 and 100.
+QSANKEY.YEARS.OF.DECAY <- 3   # Set to any number between 3 and 100.
 
 ### Folder locations
 SHINY.CODE <- "HWP_Shiny_App/R_code_data/"              # Code chunks that both Shiny and the stand-alone model depend upon. They are stored in the Shiny app folder.
 IMPORT.DATA.FOLDER <- "HWP Data/ExistingData/"
-IMPORT.DATA.FILE <- "CA_Inputs_HWP_Model_StockChangeApproach.xlsx"    # Change this to select other files from the "HWP Data" folder.
-## Stock option (from CalFIRE) #IMPORT.DATA.FILE <- "CA_Inputs_HWP_Model (2).xlsx"    # Change this to select other files from the "HWP Data" folder.
+IMPORT.DATA.FILE <- "CA_Inputs_HWP_Model_ProductionApproach.xlsx"    # Change this to select other files from the "HWP Data" folder.
+## Stock option (from CalFIRE) #IMPORT.DATA.FILE <- "CA_Inputs_HWP_Model (2).xlsx"
 QAQC.FOLDER <- "HWP_Stand_Alone_Files/QAQC_Reports/"
 SA.CODE <- "HWP_Stand_Alone_Files/Standalone_R_files/"   # Stand-alone HWP model code
 
@@ -65,45 +60,58 @@ hwp.data <- hwp.model.data %>%
   set_names() %>%
   map(read.xlsx, xlsxFile = hwp.model.data)
 
-if (dim(hwp.data$BFCF)[2] > 3) {           # Some template files have additional information for users on the BFCF Excel worksheet. This code 
-  hwp.data$BFCF <- hwp.data$BFCF[, 1:3]    #    reduces the table to the desired values.
+if (dim(hwp.data$BFCF)[2] > 3) {           # Some template files have additional information for users on the BFCF Excel worksheet. 
+  hwp.data$BFCF <- hwp.data$BFCF[, 1:3]    # Reduce the table to the desired values.
   hwp.data$BFCF <- hwp.data$BFCF %>% dplyr::filter(is.na(Conversion) == FALSE) 
 }
 
 hwp.model.options <- hwp.data$HWP_MODEL_OPTIONS
 
-
-##         The code will run a QA test of incoming tables, if desired. If the user sets the QA_TEST option in HWP_MODEL_OPTIONS.csv to FALSE, 
-###         the program will attempt to load the files regardless.
+## The code will run a QA test of incoming tables, if desired. 
+## If QA_TEST in HWP_MODEL_OPTIONS is FALSE, the program will attempt to load the files regardless.
 if (hwp.data$HWP_MODEL_OPTIONS$QA_TEST[1] == TRUE) {      # Should QA test be run?  
   source(paste0(SHINY.CODE, "QA_Code_Shiny.r"), local = TRUE)  # Using QAQC tests from Shiny app
   write_csv(joint.err.term.rept, paste0(QAQC.FOLDER, "Error_Report.csv"))  # If QAQC detects errors or files fail to load, R terminates
+  
   .Last <- function() {
     graphics.off()
     print("Terminating HWP script. HWP files incorrectly loaded or contained formatting errors.  See QA Error Report.")
   }
-  if (QA_PASS == TRUE) print("Data file passed QA tests") else quit(save = "ask", runLast = TRUE)  # If any terminate = 1, quit R
+  
+  if (QA_PASS == TRUE) {
+    print("Data file passed QA tests")
+  } else {
+    quit(save = "ask", runLast = TRUE)  # If any terminate = 1, quit R
+  }
   
 } else {
   harv.hwp <- hwp.data$Harvest_MBF   # harvest data, units = 1000 board feet. Used to obtain number of years (N.YEARS) and ownership names
-  bfcf.hwp <- hwp.data$BFCF  # Thousand board feet to hundred cubic feet
+  bfcf.hwp <- hwp.data$BFCF          # Thousand board feet to hundred cubic feet
   tpr.hwp <- hwp.data$TimberProdRatios     # Timber product ratios  (n = 40)
-  ppr.hwp <- hwp.data$PrimaryProdRatio      # Primary product ratios (n = 64) 
-  eur.hwp <- hwp.data$EndUseRatios       # Loading End Use Ratios (n = N.EUR)
+  ppr.hwp <- hwp.data$PrimaryProdRatio     # Primary product ratios (n = 64) 
+  eur.hwp <- hwp.data$EndUseRatios         # Loading End Use Ratios (n = N.EUR)
   ratio_cat.hwp <- hwp.data$RatioCategories    # Associates TPR, EUR, and PPR values
-  ccf_conversion.hwp <- hwp.data$CCF_MT_Conversion     # getting hundred cubic feet (CCF) to metric ton (MT) carbon conversion factors
+  ccf_conversion.hwp <- hwp.data$CCF_MT_Conversion     # CCF to MT C conversion factors
   eu_half.lives.hwp <- hwp.data$EU_HalfLives    # Half-lives of End Use Products
-  discard.fates.hwp <- hwp.data$DiscardFates    # Fraction of discarded C to different fates (dumps, compost, landfill, burned with energy capture, etc.)
-  discard.hl.hwp <- hwp.data$Discard_HalfLives  # Half-lives of discards in different SWDS categories (dumps, landfills) plus fraction of landfill discard that doesn't decay
+  discard.fates.hwp <- hwp.data$DiscardFates    # Fraction of discarded C to different fates
+  discard.hl.hwp <- hwp.data$Discard_HalfLives  # Half-lives of discards in different SWDS categories
   mc.adj.hwp <- hwp.data$MonteCarloValues 
 }
-
-
 
 #######################################################
 ### User Defined Options and CONSTANTS
 
+# This script sets: years, N.YEARS, N.EUR, N.OWNERSHIP, ownership.names, 
+# PIU.WOOD.LOSS, PIU.PAPER.LOSS, SHIFTYEAR, OWNERSHIP_STARTYEAR, etc.
 source(paste0(SHINY.CODE, "HWP_Model_Prep.R"), local = TRUE)
+
+# Optional: sanity check
+cat("Ownerships in model.outputs$eu_array after HWP_Output_Prep.R:\n")
+print(dimnames(model.outputs$eu_array)[[2]])
+
+# Build/update the 'hwp' object used by downstream functions (e.g., hwp_report_table)
+# so it reflects the arrays modified in HWP_Output_Prep.R (including Exports).
+hwp <- model.outputs
 
 opt.list <- list()
 for (i in 1:ncol(hwp.model.options)) {             # Using for-loop to add columns to list
@@ -111,116 +119,136 @@ for (i in 1:ncol(hwp.model.options)) {             # Using for-loop to add colum
 }
 names(opt.list) <- colnames(hwp.model.options)
 
-OUTPUT_ARRAYS <- unlist(opt.list$OUTPUT_ARRAYS, use.names = F)[1]  # Save HWP model arrays in Arrays folder?
-#OUTPUT_FIGURES <- unlist(opt.list$OUTPUT_FIGURES, use.names = F)[1]  # Save HWP model figures in Figures folder?
-OUTPUT_TABLES <- unlist(opt.list$OUTPUT_TABLES, use.names = F)[1]  # Save HWP model tables in Tables folder?
+OUTPUT_ARRAYS  <- unlist(opt.list$OUTPUT_ARRAYS,  use.names = FALSE)[1]  # Save HWP model arrays in Arrays folder?
+#OUTPUT_FIGURES <- unlist(opt.list$OUTPUT_FIGURES, use.names = FALSE)[1] # Save HWP model figures in Figures folder?
+OUTPUT_TABLES  <- unlist(opt.list$OUTPUT_TABLES,  use.names = FALSE)[1]  # Save HWP model tables in Tables folder?
 
-#FIGURELOC <- unlist(opt.list$FIGURELOC, use.names = F)[1]   # Figure storage folder 
-ARRAYLOC <- unlist(opt.list$ARRAYLOC, use.names = F)[1]     # Array storage folder
-TABLELOC <- unlist(opt.list$TABLELOC, use.names = F)[1]    # Table storage folder
-
+#FIGURELOC <- unlist(opt.list$FIGURELOC, use.names = FALSE)[1]   # Figure storage folder 
+ARRAYLOC  <- unlist(opt.list$ARRAYLOC,  use.names = FALSE)[1]    # Array storage folder
+TABLELOC  <- unlist(opt.list$TABLELOC,  use.names = FALSE)[1]    # Table storage folder
 
 ############# RUN HWP BASE MODEL ###############
-source(paste0(SHINY.CODE, "PlotFunctions1.r"), local = TRUE)     # Loading functions used by the HWP model.
+source(paste0(SHINY.CODE, "PlotFunctions1.r"),    local = TRUE)  # Loading functions used by the HWP model.
 source(paste0(SHINY.CODE, "HWP_Model_Function.r"), local = TRUE) # The HWP model (a function) itself.
 
-hwp.output <- HwpModel.fcn(harv = harv.hwp,  
-                           bfcf = bfcf.hwp,
-                           tpr = tpr.hwp,
-                           ppr = ppr.hwp,
-                           ratio_cat = ratio_cat.hwp,
-                           ccf_conversion = ccf_conversion.hwp,
-                           eur = eur.hwp,
-                           eu_half.lives = eu_half.lives.hwp,
-                           discard.fates = discard.fates.hwp,
-                           discard.hl = discard.hl.hwp, 
-                           ownership.names = ownership.names,
-                           N.EUR = N.EUR, 
-                           N.OWNERSHIP = N.OWNERSHIP, 
-                           N.YEARS = N.YEARS, 
-                           PIU.WOOD.LOSS = PIU.WOOD.LOSS,
-                           PIU.PAPER.LOSS = PIU.PAPER.LOSS)
+# NOTE: ownership.names and N.OWNERSHIP come from HWP_Model_Prep.R and
+# are passed through unchanged here to avoid any dimension mismatch.
+hwp.output <- HwpModel.fcn(
+  harv            = harv.hwp,  
+  bfcf            = bfcf.hwp,
+  tpr             = tpr.hwp,
+  ppr             = ppr.hwp,
+  ratio_cat       = ratio_cat.hwp,
+  ccf_conversion  = ccf_conversion.hwp,
+  eur             = eur.hwp,
+  eu_half.lives   = eu_half.lives.hwp,
+  discard.fates   = discard.fates.hwp,
+  discard.hl      = discard.hl.hwp, 
+  ownership.names = ownership.names,
+  N.EUR           = N.EUR, 
+  N.OWNERSHIP     = N.OWNERSHIP, 
+  N.YEARS         = N.YEARS, 
+  PIU.WOOD.LOSS   = PIU.WOOD.LOSS,
+  PIU.PAPER.LOSS  = PIU.PAPER.LOSS
+)
 
 # Prepare outputs for use in tables and arrays
 model.outputs <- hwp.output  
+
+# HWP_Output_Prep.R now:
+#  * extracts arrays from model.outputs
+#  * (optionally) appends an "Exports" ownership to eu_array for flows
+#  * computes export/import totals (T6/T7-style objects) for reporting
 source(paste0(SHINY.CODE, "HWP_Output_Prep.R"), local = TRUE)
 
 
 ################################################
-
 ### Selection of year shift ###
 ##   To shift years, set SHIFTYEAR to TRUE in the file HWP_MODEL_OPTIONS, otherwise FALSE
 ##   This will change output for tables, arrays, and figures                
 
-yearsTPO <- years                             ## For TPO, use years as-is.
-yearsSE <- years  + 1                         ##  For years for Stocks and Emitted values shift to one year later (unless not shifted, see next code section)
+yearsTPO <- years          ## For TPO, use years as-is.
+yearsSE  <- years + 1      ## For Stocks and Emitted values, shift to one year later (if enabled)
 
 if (SHIFTYEAR) {           # Shifted variables
-  yearsUse <- yearsSE
+  yearsUse          <- yearsSE
   OwnershipStartYear <- OWNERSHIP_STARTYEAR + 1
 } else {                   # Unshifted variables
-  yearsUse <- yearsTPO
+  yearsUse          <- yearsTPO
   OwnershipStartYear <- OWNERSHIP_STARTYEAR
 }
-###############
 
+###############
 
 # Code determines, from HWP_MODEL_OPTIONS.csv file, whether to generate figures, tables, and run the Monte Carlo.
 
 # The following code generates the same tables as the Shiny app
 if (OUTPUT_TABLES == TRUE) {   
   source(paste0(SHINY.CODE, "HWP_Tables_Code.R"), local = TRUE)
-  write_csv(t1, paste0(TABLELOC, "T1.0.Annual_Harvest.csv"))
-  write_csv(t2, paste0(TABLELOC, "T2.0.Harvest_Halflives.csv"))
-  write_csv(t3, paste0(TABLELOC, "T3.0.Cumulative.Ownership.Storage.Emissions.csv"))
+  write_csv(t1,   paste0(TABLELOC, "T1.0.Annual_Harvest.csv"))
+  write_csv(t2,   paste0(TABLELOC, "T2.0.Harvest_Halflives.csv"))
+  write_csv(t3,   paste0(TABLELOC, "T3.0.Cumulative.Ownership.Storage.Emissions.csv"))
   write_csv(t3.5, paste0(TABLELOC, "T3.5.Cumulative.Ownership.Storage.Emissions_CO2e.csv"))
-  write_csv(t4, paste0(TABLELOC, "T4.0.CumulativeStorageEmissions_summary.csv"))
+  write_csv(t4,   paste0(TABLELOC, "T4.0.CumulativeStorageEmissions_summary.csv"))
   write_csv(t4.5, paste0(TABLELOC, "T4.5.CumulativeStorageEmissions_detail.csv"))
   write_csv(t4.8, paste0(TABLELOC, "T4.8.CumulativeStorageEmissions_halflives.csv"))
-  write_csv(t5, paste0(TABLELOC, "T5.0.AnnualStorageEmissionsChange.csv"))
-  write_csv(t6, paste0(TABLELOC, "T6.0.Export_Totals.csv"))
+  write_csv(t5,   paste0(TABLELOC, "T5.0.AnnualStorageEmissionsChange.csv"))
+  write_csv(t6,   paste0(TABLELOC, "T6.0.Export_Totals.csv"))
   write_csv(t6.1, paste0(TABLELOC, "T6.1.Cumulative_Export_Totals.csv"))
   write_csv(t6.2, paste0(TABLELOC, "T6.2.Export_Percent_of_EUR.csv"))
-  write_csv(t7, paste0(TABLELOC, "T7.0.Import_Totals.csv"))
+  write_csv(t7,   paste0(TABLELOC, "T7.0.Import_Totals.csv"))
   write_csv(t7.1, paste0(TABLELOC, "T7.1.Cumulative_Import_Totals.csv"))
   write_csv(t7.2, paste0(TABLELOC, "T7.2.Import_Percent_of_EUR.csv"))
 }
 
-
 # Now, if indicated in the Excel file, the code will produce and save the model's arrays. 
 ArraySave.fcn <- function() {    
-  # Data frame list population function - writes Excel files out of 3-d arrays, first turning them into a list of 2-d data frames
+  # Data frame list population function - writes Excel files out of 3-d arrays,
+  # turning them into a list of 2-d data frames. We use *each array’s own*
+  # ownership labels (dimnames) to avoid mismatches when eu_array has an
+  # extra "Exports" ownership, but other arrays still have 6 owners.
   DFL_Pop.fcn <- function(arrayX, array_name) {
-    x <- lapply(seq(dim(arrayX)[2]), function(x) data.frame(arrayX[ , x, ]))  # Creates a list of data frames, one per ownership
-    names(x) <- ownership.names
+    # Get ownership names from this specific array
+    owners_local <- dimnames(arrayX)[[2]]
+    if (is.null(owners_local)) {
+      owners_local <- paste0("Owner", seq_len(dim(arrayX)[2]))
+    }
+    
+    x <- lapply(seq_len(dim(arrayX)[2]),
+                function(j) data.frame(arrayX[ , j, ]))  # One data frame per ownership
+    names(x) <- owners_local
+    
     write_xlsx(x, path = paste0(ARRAYLOC, array_name))
   }
   
-  DFL_Pop.fcn(eu_array, "eu_array.xlsx")
-  DFL_Pop.fcn(eu.reduced_array, "eu.reduced_array.xlsx")
-  DFL_Pop.fcn(eec_array, "eec_array.xlsx")
-  DFL_Pop.fcn(fuel_array, "fuel_array.xlsx")
-  DFL_Pop.fcn(dec.input_array, "dec_array.xlsx")
+  # Use the arrays prepared in HWP_Output_Prep.R (which may have an added "Exports"
+  # ownership in eu_array, but other arrays remain with their original ownerships).
+  DFL_Pop.fcn(eu_array,              "eu_array.xlsx")
+  DFL_Pop.fcn(eu.reduced_array,      "eu.reduced_array.xlsx")
+  DFL_Pop.fcn(eec_array,             "eec_array.xlsx")
+  DFL_Pop.fcn(fuel_array,            "fuel_array.xlsx")
+  DFL_Pop.fcn(dec.input_array,       "dec_array.xlsx")
   
-  DFL_Pop.fcn(dp.total_array, "dp.total_array.xlsx")
-  DFL_Pop.fcn(ewoec_array, "ewoec_array.xlsx")
-  DFL_Pop.fcn(dumps.discard_array, "dumps.discard_array.xlsx")
-  DFL_Pop.fcn(landfill.discard_array, "lf.discard_array.xlsx")
-  DFL_Pop.fcn(recov.discard_array, "recov.discard_array.xlsx")
-  DFL_Pop.fcn(compost.input_array, "compost_array.xlsx")
-  DFL_Pop.fcn(bwoec.input_array, "bwoec_array.xlsx")
+  DFL_Pop.fcn(dp.total_array,        "dp.total_array.xlsx")
+  DFL_Pop.fcn(ewoec_array,           "ewoec_array.xlsx")
+  DFL_Pop.fcn(dumps.discard_array,   "dumps.discard_array.xlsx")
+  DFL_Pop.fcn(landfill.discard_array,"lf.discard_array.xlsx")
+  DFL_Pop.fcn(recov.discard_array,   "recov.discard_array.xlsx")
+  DFL_Pop.fcn(compost.input_array,   "compost_array.xlsx")
+  DFL_Pop.fcn(bwoec.input_array,     "bwoec_array.xlsx")
   
-  DFL_Pop.fcn(swdsCtotal_array, "swds.total_array.xlsx")
+  DFL_Pop.fcn(swdsCtotal_array,      "swds.total_array.xlsx")
   DFL_Pop.fcn(hwp.output$lf.fixed_array, "lf.fixed.input_array.xlsx")
   DFL_Pop.fcn(lf.fixed.cumsum_array, "lf.fixed.cumsum_array.xlsx")
-  DFL_Pop.fcn(landfill_array, "lf.decaying_array.xlsx")
+  DFL_Pop.fcn(landfill_array,        "lf.decaying_array.xlsx")
   
-  DFL_Pop.fcn(dumps_array, "dumps_array.xlsx")
+  DFL_Pop.fcn(dumps_array,           "dumps_array.xlsx")
   
-  DFL_Pop.fcn(pu.final_array, "pu.final_array.xlsx")
-  DFL_Pop.fcn(pu_array, "pu_array.xlsx")
-  DFL_Pop.fcn(recov_array, "recov_array.xlsx")
+  DFL_Pop.fcn(pu.final_array,        "pu.final_array.xlsx")
+  DFL_Pop.fcn(pu_array,              "pu_array.xlsx")
+  DFL_Pop.fcn(recov_array,           "recov_array.xlsx")
 }
+
 if (OUTPUT_ARRAYS == TRUE) ArraySave.fcn()
 
 
@@ -365,4 +393,18 @@ owner_sums <- apply(eu_arr, 2, function(x) sum(x, na.rm = TRUE))
 owner_sums
 
 owner_sums[grep("exp", names(owner_sums), ignore.case = TRUE)]
+
+
+dimnames(hwp$eu_array)[[2]]
+colSums(apply(hwp$eu_array, c(2,3), sum))  # or similar
+
+
+hwp <- make_hwp(model.outputs)
+
+dimnames(hwp$eu_array)[[2]]
+colSums(apply(hwp$eu_array, c(2,3), sum))      # sanity check totals
+export_outflow_series(hwp, 1965:2022)          # should now be > 0 where exports exist
+tbl_report <- hwp_report_table(hwp, year_from = 1950, year_to = 2022,
+                               metric_cum = "MMTC", domestic_mode = "A")
+
 
